@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "xchk": {
+      "command": "python3",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/xchk_mcp.py"],
+      "env": {}
+    }
+  }
+}

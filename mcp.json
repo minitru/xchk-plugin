@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "xchk": {
+      "command": "python3",
+      "args": ["${PLUGIN_ROOT}/mcp/xchk_mcp.py"],
+      "env": {}
+    }
+  }
+}
