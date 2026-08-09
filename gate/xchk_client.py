@@ -126,6 +126,14 @@ class XchkClient:
         if status == 403 and (data or {}).get("error") == "Agent API key required":
             return {"skip": True, "reason": "not_agent_key"}
 
+        # A stale run ticket is a clock problem, not a policy one: the plate is
+        # valid and nothing about its authority changed. The server answers 403
+        # + disposition:'forbid' + code:'invalid_run_ticket', so this MUST be
+        # checked before the forbid branch below — otherwise it reads as a hard
+        # refusal and the caller's re-dispatch path can never run.
+        if (data or {}).get("code") == "invalid_run_ticket":
+            return {"skip": True, "reason": "invalid_run_ticket"}
+
         # authRef/actionSeq: the registry's per-action reference (MACG-004
         # dashcam) — carried up so the local recorder can chain it.
         # paramsHash: the registry's content hash of the AUTHORIZED action;

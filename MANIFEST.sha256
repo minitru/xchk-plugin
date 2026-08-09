@@ -3,8 +3,8 @@
 # its status ping (self-attested; issuer holds the known-good copy).
 99bf19d43be76236ab421e283fb0bf9696a14862dec2d842b19877a6f333acfe  .claude-plugin/plugin.json
 f99c100e570b3e037bd00e3edc59ff6fff771b2a15372e17e718871bc8feab37  .mcp.json
-ef5050ef535738104956877c17b22500eab95af466dd91183a3d914860014cb6  gate/xchk_client.py
-0a333c0df57932920bd681f64a38e6380dc8389981d00f6230ee0294ff7ac8ea  gate/xchk_hook.py
+b460a6deabdf25bb8b22dceb418146e21a7f08a85bf4b0da3fe18bb7b8e13621  gate/xchk_client.py
+ecd9a1548156ef06308acaf47facabb8572e398ca8cbbcabdf61d1d24729fb19  gate/xchk_hook.py
 0a2a8be615847b0f54c61efe320795597def5e474aeb8ebc6bbaec990ca892e0  hooks/hooks.json
 e8da0de7865406073a7188fad24e3dac679d597da19d1afc1a7dd3eaa68eaf43  mcp/xchk_mcp.py
 ed2c556ed78b657f6255f248509ddf749d7e1fe085be119e6b377c5994984bd6  mcp.json

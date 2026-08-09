@@ -18,6 +18,7 @@ Security posture:
 
 from __future__ import annotations
 
+import calendar
 import json
 import os
 import re
@@ -235,8 +236,13 @@ def dispatch(client: XchkClient, session_id: str) -> dict | None:
         return None
     run_info = resp.get("run") or {}
     ttl_hint = run_info.get("expiresAt")
+    # expiresAt is UTC ISO ("...Z"); timegm reads the struct as UTC. mktime
+    # reads it as LOCAL, which put expiry hours late on any non-UTC host and
+    # blinded the renew-before-expiry check in load_run() — the client went on
+    # presenting a ticket the server had already expired.
     try:
-        expires = time.mktime(time.strptime(ttl_hint[:19], "%Y-%m-%dT%H:%M:%S")) if ttl_hint else time.time() + 8 * 3600
+        expires = (calendar.timegm(time.strptime(ttl_hint[:19], "%Y-%m-%dT%H:%M:%S"))
+                   if ttl_hint else time.time() + 8 * 3600)
     except (TypeError, ValueError):
         expires = time.time() + 8 * 3600
     run = {
@@ -326,10 +332,15 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
     summary = summarize(tool_name, tool_input)
     auth = client.authorize(mapped, args, prompt=f"Claude Code {tool_name}", danger_desc=summary, run_ticket=ticket)
 
+    # Renew, don't refuse: an aged-out ticket on a live plate means only the
+    # clock ran out, so re-dispatch for THIS session and carry on. A wrong or
+    # revoked licence still refuses — that path returns a real forbid.
     if auth.get("skip") and auth.get("reason") == "invalid_run_ticket":
         drop_run(session_id)
         run = dispatch(client, session_id)
         ticket = (run or {}).get("ticket")
+        # The old ref named an expired run; attribute to the successor.
+        run_ref = (run or {}).get("runRef") or run_ref
         auth = client.authorize(mapped, args, prompt=f"Claude Code {tool_name}", danger_desc=summary, run_ticket=ticket)
 
     if auth.get("skip"):
