@@ -68,8 +68,45 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None):
         except Exception:
             pass
 
-PLUGIN_VERSION = "0.1.1"
+PLUGIN_VERSION = "0.1.2"
 MAX_STDIN_BYTES = 512 * 1024
+
+
+def gate_integrity() -> dict:
+    """Self-hash the gate against MANIFEST.sha256 at the plugin root.
+
+    SELF-ATTESTED by construction: a compromised gate can lie here, and the
+    design accepts that — the claim rides the signed status ping, bound to
+    the run and dated, so the gate must either tell the truth (evident now)
+    or lie on the record (evident later, against the issuer's known-good
+    manifest). Tamper-EVIDENT, never tamper-proof. Absence of a manifest is
+    the legacy curl-install, reported as such rather than alarmed on.
+
+    Manifest lines: '<sha256>  <path relative to plugin root>'.
+    """
+    import hashlib
+    root = Path(__file__).resolve().parent.parent
+    manifest = root / "MANIFEST.sha256"
+    if not manifest.is_file():
+        return {"gateIntegrity": "unmanifested"}
+    try:
+        raw = manifest.read_bytes()
+        status = "verified"
+        for line in raw.decode().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            want, rel = line.split(None, 1)
+            target = root / rel.strip()
+            if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != want:
+                status = "modified"
+        return {
+            "gateIntegrity": status,
+            "gateManifestSha": hashlib.sha256(raw).hexdigest(),
+        }
+    except Exception:
+        # An unreadable manifest is not silently "verified".
+        return {"gateIntegrity": "modified"}
 STATE_DIR = Path(os.environ.get("XCHK_STATE_DIR", "~/.xchk/claude-runs")).expanduser()
 CONFIG_PATH = Path(os.environ.get("XCHK_CONFIG", "~/.xchk/claude.json")).expanduser()
 SESSION_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
@@ -240,6 +277,7 @@ def on_session_start(data: dict, cfg: dict, client: XchkClient) -> None:
         guardedHost=host,
         hostLabel=short,
         pluginVersion=PLUGIN_VERSION,
+        **gate_integrity(),
     )
     session_id = data.get("session_id") or ""
     run = load_run(session_id) or dispatch(client, session_id)
