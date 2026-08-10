@@ -347,12 +347,18 @@ class XchkClient:
         task_label: Optional[str] = None,
         ttl_seconds: Optional[int] = None,
         grant_mask: Optional[list] = None,
+        revoke_on: Optional[list] = None,
     ) -> Optional[Dict[str, Any]]:
         """POST /api/agents/runs — mint a run under this plate.
 
         Returns {"run": {..., "runSeq", "agentPlate", "runRef"}, "runTicket": str}
         or None. The raw ticket is returned exactly once; the server keeps only
         its hash.
+
+        revoke_on declares the conditions that END this run — the registry
+        evaluates them on every authorize and kills the delegation itself
+        (forbid, omission, manager_dark, host_dark). The owner's fleet default
+        is unioned in server-side, so asking for fewer never gets you fewer.
         """
         if not self.configured:
             return None
@@ -367,6 +373,8 @@ class XchkClient:
             body["ttlSeconds"] = int(ttl_seconds)
         if grant_mask:
             body["grantMask"] = grant_mask
+        if revoke_on:
+            body["revokeOn"] = list(revoke_on)
         status, data = self.request("POST", "/api/agents/runs", body=body, timeout=20)
         if status in (200, 201) and isinstance(data, dict) and data.get("runTicket"):
             return data
