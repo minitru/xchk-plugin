@@ -1,10 +1,21 @@
 #!/usr/bin/env python3
-"""xChk license hook for Claude Code — one session = one run under the plate.
+"""xChk license hook for Claude Code and Cursor — one session = one run.
 
 SessionStart  -> harness check-in + dispatch a run (PLATE.N) for this session
 PreToolUse    -> authorize the proposed action under the run ticket
                  (allow / forbid / attest-with-human-approval)
 SessionEnd    -> end the run
+
+TWO HARNESSES, ONE GATE. Cursor reads Claude Code's hook registration from
+.claude/settings.json, maps the event names, and honours the nested
+hookSpecificOutput.permissionDecision this file already emits — verified
+empirically 2026-08-11 (a Write refused by this shape never reached disk).
+What Cursor does NOT do is rename the payload: it arrives in Cursor's own
+dialect, hook_event_name == 'preToolUse', lowercase. Exact-match dispatch
+therefore matches nothing, exits 0, and ALLOWS EVERY GATED ACTION — a gate
+that installs cleanly, runs without error, and refuses nothing. Event names
+are normalised (see _EVENTS) for exactly that reason; the test asserting the
+lowercase spellings route is not optional.
 
 Security posture:
   - Config and run-ticket state live under ~/.xchk with 0700/0600 perms.
@@ -108,19 +119,72 @@ def gate_integrity() -> dict:
     except Exception:
         # An unreadable manifest is not silently "verified".
         return {"gateIntegrity": "modified"}
-STATE_DIR = Path(os.environ.get("XCHK_STATE_DIR", "~/.xchk/claude-runs")).expanduser()
-CONFIG_PATH = Path(os.environ.get("XCHK_CONFIG", "~/.xchk/claude.json")).expanduser()
 SESSION_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
 
-# Claude Code tool -> xchk authorize vocabulary
+# Harness tool -> xchk authorize vocabulary. Claude Code and Cursor happen to
+# agree on Read/Write/Edit; Cursor calls the terminal "Shell". A name absent
+# here is UNGATED, so this table is the coverage boundary: Cursor's editor
+# surface is only proven for Write, and any further edit tool it ships (under
+# whatever name) passes unauthorized until it is added and probed. Per-area
+# coverage, not per-harness — see docs/multi-harness-runs.md.
 TOOL_MAP = {
     "Bash": "terminal",
+    "Shell": "terminal",          # Cursor
     "Write": "write_file",
     "Edit": "patch",
     "MultiEdit": "patch",
     "NotebookEdit": "patch",
     "Read": "read_file",
 }
+
+# Harness bookkeeping that arrives through the model's own Write tool. Cursor
+# writes agent scratch to ~/.cursor/projects/<slug>/agent-tools/<uuid>.txt, and
+# gating it would put the plate's name on the harness's internal filing — noise
+# in the record at best, and at worst a human-approval prompt over a UUID no
+# operator could adjudicate. Deferred to the harness's own permission flow,
+# never recorded as an allow: it is not the agent acting on the user's work.
+INTERNAL_PATH_RE = re.compile(r"/\.cursor/projects/[^/]+/agent-tools/")
+
+# Wire name -> display name. The wire name keys the install slot, so a harness
+# missing here would silently share Claude's slot; resolve_harness() defaults
+# conservatively and the label is cosmetic.
+HARNESS_LABELS = {"claude": "Claude Code", "cursor": "Cursor"}
+
+# Set once in main() from the payload, before any path is resolved.
+HARNESS = "claude"
+HARNESS_LABEL = "Claude Code"
+STATE_DIR = Path("~/.xchk/claude-runs").expanduser()
+CONFIG_PATH = Path("~/.xchk/claude.json").expanduser()
+
+
+def resolve_harness(data: dict) -> str:
+    """Which harness is calling. XCHK_HARNESS wins (the hook registration sets
+    it); otherwise sniff the payload, because the failure mode of guessing
+    "claude" for a Cursor session is not cosmetic — both harnesses would report
+    into ONE (harness, guardedHost) install slot, so revoking the key for one
+    silently disarms the other, and the console would show a single covered
+    surface where two are running."""
+    env = (os.environ.get("XCHK_HARNESS") or "").strip().lower()
+    if env:
+        return env
+    if data.get("cursor_version"):
+        return "cursor"
+    return "claude"
+
+
+def apply_harness(harness: str) -> None:
+    """Bind this process to one harness: label, config, run state. Separate
+    state dirs matter — run tickets are per-install, and one dir would let a
+    Cursor session load a Claude session's ticket on a session_id collision."""
+    global HARNESS, HARNESS_LABEL, STATE_DIR, CONFIG_PATH
+    HARNESS = harness or "claude"
+    HARNESS_LABEL = HARNESS_LABELS.get(HARNESS, HARNESS.title())
+    STATE_DIR = Path(
+        os.environ.get("XCHK_STATE_DIR") or f"~/.xchk/{HARNESS}-runs"
+    ).expanduser()
+    CONFIG_PATH = Path(
+        os.environ.get("XCHK_CONFIG") or f"~/.xchk/{HARNESS}.json"
+    ).expanduser()
 
 
 def load_config() -> dict:
@@ -230,7 +294,7 @@ def dispatch(client: XchkClient, session_id: str) -> dict | None:
     tty = controlling_tty()
     host = socket.gethostname().split(".")[0]
     session_ref = f"{tty or 'tty?'}@{host}#{(session_id or '')[:8]}"
-    resp = client.dispatch_run(harness="claude", session_ref=session_ref,
+    resp = client.dispatch_run(harness=HARNESS, session_ref=session_ref,
                                task_label=task_label)
     if not resp:
         return None
@@ -257,6 +321,18 @@ def dispatch(client: XchkClient, session_id: str) -> dict | None:
     return run
 
 
+# Every spelling either harness delivers, folded to the canonical name this
+# file dispatches on. Claude Code sends PascalCase; Cursor sends its own
+# lowerCamel names for the same events. An unlisted spelling is not an error
+# and not a refusal — it exits 0 — so this table is load-bearing for coverage.
+_EVENTS = {
+    "sessionstart": "SessionStart",
+    "pretooluse": "PreToolUse",
+    "stop": "Stop",
+    "sessionend": "SessionEnd",
+}
+
+
 def emit(event: str, extra: dict) -> None:
     print(json.dumps({"hookSpecificOutput": {"hookEventName": event, **extra}}))
 
@@ -275,7 +351,7 @@ def on_session_start(data: dict, cfg: dict, client: XchkClient) -> None:
     short = socket.gethostname().split(".")[0]
     host = (cfg.get("guarded_host") or "").strip() or short
     client.report_harness_install(
-        "claude",
+        HARNESS,
         pluginInstalled=True,
         apiKeyConfigured=True,
         approverConfigured=bool(cfg.get("approver")),
@@ -313,6 +389,10 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
     if not mapped:
         sys.exit(0)  # ungated tool — defer to normal permission flow
 
+    target = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
+    if mapped != "terminal" and target and INTERNAL_PATH_RE.search(target):
+        sys.exit(0)  # harness's own scratch — see INTERNAL_PATH_RE
+
     if not client.configured:
         if cfg["fail_closed"]:
             decide("deny", "xchk: license client not configured and XCHK_FAIL_CLOSED is set")
@@ -330,7 +410,7 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
         args["path"] = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
 
     summary = summarize(tool_name, tool_input)
-    auth = client.authorize(mapped, args, prompt=f"Claude Code {tool_name}", danger_desc=summary, run_ticket=ticket)
+    auth = client.authorize(mapped, args, prompt=f"{HARNESS_LABEL} {tool_name}", danger_desc=summary, run_ticket=ticket)
 
     # Renew, don't refuse: an aged-out ticket on a live plate means only the
     # clock ran out, so re-dispatch for THIS session and carry on. A wrong or
@@ -341,7 +421,7 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
         ticket = (run or {}).get("ticket")
         # The old ref named an expired run; attribute to the successor.
         run_ref = (run or {}).get("runRef") or run_ref
-        auth = client.authorize(mapped, args, prompt=f"Claude Code {tool_name}", danger_desc=summary, run_ticket=ticket)
+        auth = client.authorize(mapped, args, prompt=f"{HARNESS_LABEL} {tool_name}", danger_desc=summary, run_ticket=ticket)
 
     if auth.get("skip"):
         if cfg["fail_closed"]:
@@ -361,7 +441,7 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
         decide("ask", f"xchk: area {area} requires attestation and no remote approver is configured — asking locally")
 
     att_id, err = client.create_attestation(
-        prompt=f"{run_ref} (via Claude Code) wants to {summary or tool_name}",
+        prompt=f"{run_ref} (via {HARNESS_LABEL}) wants to {summary or tool_name}",
         target_email=approver,
         tool_name=mapped,
         args=args,
@@ -428,9 +508,10 @@ def main() -> None:
     if not isinstance(data, dict):
         sys.exit(0)
 
+    apply_harness(resolve_harness(data))
     cfg = load_config()
     client = make_client(cfg)
-    event = data.get("hook_event_name") or ""
+    event = _EVENTS.get(str(data.get("hook_event_name") or "").lower(), "")
     try:
         if event == "SessionStart":
             on_session_start(data, cfg, client)

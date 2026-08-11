@@ -23,6 +23,11 @@ for p in root.glob("gate/*.py"):
 # Every file whose bytes participate in enforcement or agent-visible behavior.
 COVERED = sorted([
     *root.glob("gate/*.py"),
+    # cursor/ wires the same gate into Cursor's own hooks.json. It decides
+    # WHICH events reach the gate, so its bytes decide coverage as surely as
+    # the gate's do — a silently edited installer could drop preToolUse and
+    # leave a live plate gating nothing.
+    *root.glob("cursor/*.py"),
     root / "hooks/hooks.json",
     root / "mcp/xchk_mcp.py",
     root / "skills/xchk-adopt/SKILL.md",
