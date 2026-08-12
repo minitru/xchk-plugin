@@ -333,6 +333,59 @@ _EVENTS = {
 }
 
 
+_LICENSE_HEADER = "X-Xchk-License"
+
+
+def stamp_license_header(plate: str) -> None:
+    """Put the plate into ~/.claude/settings.json env.ANTHROPIC_CUSTOM_HEADERS
+    so EVERY claude session on this host — user-launched included — stamps
+    'X-Xchk-License: <plate>' on every model call, for a corp gateway to log
+    and query by plate. Claude Code reads that env once at startup, so this is
+    static (plate scope, not run) and self-heals: the gate learns the plate at
+    dispatch and writes it, and every session from then on carries it.
+
+    Claude only. Cursor routes model calls through its own backend and Hermes
+    through its own runtime; neither honours ANTHROPIC_CUSTOM_HEADERS, so their
+    plate injection is a separate vector.
+
+    Surgical: loads the whole settings file, touches only
+    env.ANTHROPIC_CUSTOM_HEADERS, preserves every other env var and any other
+    custom header lines, replaces (never duplicates) a prior X-Xchk-License,
+    and writes only when the value actually changes — so it does not churn the
+    user's settings on every session.
+    """
+    if HARNESS != "claude" or not plate:
+        return
+    path = Path("~/.claude/settings.json").expanduser()
+    if not path.is_file():
+        return  # the gate runs FROM this file — missing means don't conjure one
+    try:
+        settings = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return  # never overwrite an unreadable/foreign settings file
+    if not isinstance(settings, dict):
+        return
+    env = settings.get("env")
+    if not isinstance(env, dict):
+        env = {}
+    raw = env.get("ANTHROPIC_CUSTOM_HEADERS") or ""
+    # Header lines are newline-separated "Name: value"; keep everyone else's.
+    kept = [ln for ln in raw.split("\n")
+            if ln.strip() and not ln.strip().lower().startswith(_LICENSE_HEADER.lower() + ":")]
+    kept.append(f"{_LICENSE_HEADER}: {plate}")
+    new_value = "\n".join(kept)
+    if raw == new_value:
+        return  # already correct — do not rewrite the file
+    env["ANTHROPIC_CUSTOM_HEADERS"] = new_value
+    settings["env"] = env
+    try:
+        tmp = path.with_suffix(".json.xchk-tmp")
+        tmp.write_text(json.dumps(settings, indent=2))
+        tmp.replace(path)  # atomic — a half-written settings.json bricks claude
+    except OSError:
+        pass
+
+
 def emit(event: str, extra: dict) -> None:
     # Cursor maps Claude Code's nested permissionDecision to its own permission
     # field, which is why one gate serves both — but that mapping covers the
@@ -373,6 +426,10 @@ def on_session_start(data: dict, cfg: dict, client: XchkClient) -> None:
     )
     session_id = data.get("session_id") or ""
     run = load_run(session_id) or dispatch(client, session_id)
+    # Stamp the plate into the host's model-call headers for the corp gateway.
+    # Written every session but no-ops unless the value changed, so it settles
+    # after the first dispatch and stays put.
+    stamp_license_header((run or {}).get("plate"))
     if run and run.get("runRef"):
         emit("SessionStart", {
             "additionalContext": (
