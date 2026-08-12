@@ -334,6 +334,16 @@ _EVENTS = {
 
 
 def emit(event: str, extra: dict) -> None:
+    # Cursor maps Claude Code's nested permissionDecision to its own permission
+    # field, which is why one gate serves both — but that mapping covers the
+    # DECISION only. additionalContext has no Cursor equivalent, so the licence
+    # banner emitted in Claude's shape is silently dropped and a Cursor session
+    # never learns it is licensed: no plate in context, nothing for the model
+    # to cite, and an operator with no sign the gate is even there. Cursor's
+    # own sessionStart contract is a flat {additional_context}.
+    if HARNESS == "cursor" and "additionalContext" in extra:
+        print(json.dumps({"additional_context": extra["additionalContext"]}))
+        return
     print(json.dumps({"hookSpecificOutput": {"hookEventName": event, **extra}}))
 
 
