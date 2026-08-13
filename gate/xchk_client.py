@@ -99,6 +99,8 @@ class XchkClient:
         prompt: str,
         danger_desc: str = "",
         run_ticket: Optional[str] = None,
+        action_area: Optional[str] = None,
+        delegation_chain: Optional[list] = None,
     ) -> Dict[str, Any]:
         """POST /api/agents/authorize. Returns disposition or skip for legacy keys."""
         if not self.configured:
@@ -111,6 +113,17 @@ class XchkClient:
         }
         if run_ticket:
             body["runTicket"] = run_ticket
+        # actionArea short-circuits the server's text inference — used for
+        # actions (subagent spawns) whose body has no command/path to infer
+        # from. The server validates against its own area vocabulary; an
+        # unknown value degrades to 'global', never errors.
+        if action_area:
+            body["actionArea"] = action_area
+        # The caller-declared delegation edge (parent run identity). The
+        # server normalizes and records it; content binding rides `summary`,
+        # which is part of the server's paramsHash.
+        if delegation_chain:
+            body["delegationChain"] = delegation_chain
         if tool_name == "terminal":
             body["command"] = normalize_terminal_command(args.get("command") or "")
         elif tool_name in ("write_file", "patch", "read_file"):

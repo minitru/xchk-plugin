@@ -135,7 +135,22 @@ TOOL_MAP = {
     "MultiEdit": "patch",
     "NotebookEdit": "patch",
     "Read": "read_file",
+    # Subagent spawning IS a gated action: an ungated spawn is a delegation
+    # edge that never touches the licence — the child works under the parent's
+    # run with no authorization, no ledger entry, no delegationChain. "Task"
+    # is Claude Code's classic name; "Agent" and "Workflow" are the newer
+    # harness spellings for the same capability.
+    "Task": "spawn_agent",
+    "Agent": "spawn_agent",
+    "Workflow": "spawn_agent",
 }
+
+# Tools that delegate work to a subagent. Their authorize call carries an
+# explicit actionArea (area inference reads command/path text, and a spawn has
+# neither) and a delegationChain naming this run as the parent, so the edge
+# lands on the record in the registry's own vocabulary.
+SPAWN_TOOLS = {"Task", "Agent", "Workflow"}
+SPAWN_AREA = "operations"
 
 # Harness bookkeeping that arrives through the model's own Write tool. Cursor
 # writes agent scratch to ~/.cursor/projects/<slug>/agent-tools/<uuid>.txt, and
@@ -443,8 +458,33 @@ def on_session_start(data: dict, cfg: dict, client: XchkClient) -> None:
 def summarize(tool_name: str, tool_input: dict) -> str:
     if tool_name == "Bash":
         return str(tool_input.get("command") or "")[:300]
+    if tool_name in SPAWN_TOOLS:
+        # Task/Agent: {description, prompt, subagent_type}. Workflow: a script
+        # whose meta carries name/description; fall back to the prompt head so
+        # an approver always sees WHAT is being delegated, not just that
+        # something is.
+        kind = str(tool_input.get("subagent_type") or tool_input.get("name") or "").strip()
+        what = str(tool_input.get("description") or tool_input.get("prompt")
+                   or tool_input.get("script") or "").strip()
+        return f"spawn subagent{f' [{kind}]' if kind else ''}: {what}"[:300]
     path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
     return f"{tool_name} {path}"[:300]
+
+
+def parent_chain(run: dict | None) -> list | None:
+    """This run's identity as a one-entry delegationChain — the parent edge
+    of the spawn being authorized. Field names are the server's
+    normalizeDelegationChain vocabulary; entries with no identity at all are
+    dropped server-side, so an unlicensed session simply declares nothing."""
+    plate = (run or {}).get("plate")
+    run_ref = (run or {}).get("runRef")
+    if not (plate or run_ref):
+        return None
+    return [{
+        "agentPlate": plate,
+        "agentName": run_ref or plate,
+        "role": "parent",
+    }]
 
 
 def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
@@ -473,11 +513,19 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
     args = {}
     if mapped == "terminal":
         args["command"] = str(tool_input.get("command") or "")
+    elif mapped == "spawn_agent":
+        args["prompt"] = str(tool_input.get("prompt") or tool_input.get("script") or "")[:500]
     else:
         args["path"] = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
 
+    # A spawn declares its area (nothing in it for the server to infer an
+    # area FROM) and its delegation edge: this run is the parent.
+    area_hint = SPAWN_AREA if mapped == "spawn_agent" else None
+    chain = parent_chain(run) if mapped == "spawn_agent" else None
+
     summary = summarize(tool_name, tool_input)
-    auth = client.authorize(mapped, args, prompt=f"{HARNESS_LABEL} {tool_name}", danger_desc=summary, run_ticket=ticket)
+    auth = client.authorize(mapped, args, prompt=f"{HARNESS_LABEL} {tool_name}", danger_desc=summary,
+                            run_ticket=ticket, action_area=area_hint, delegation_chain=chain)
 
     # Renew, don't refuse: an aged-out ticket on a live plate means only the
     # clock ran out, so re-dispatch for THIS session and carry on. A wrong or
@@ -486,9 +534,12 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
         drop_run(session_id)
         run = dispatch(client, session_id)
         ticket = (run or {}).get("ticket")
-        # The old ref named an expired run; attribute to the successor.
+        # The old ref named an expired run; attribute to the successor —
+        # including the delegation edge, which names the NEW run as parent.
         run_ref = (run or {}).get("runRef") or run_ref
-        auth = client.authorize(mapped, args, prompt=f"{HARNESS_LABEL} {tool_name}", danger_desc=summary, run_ticket=ticket)
+        chain = parent_chain(run) if mapped == "spawn_agent" else None
+        auth = client.authorize(mapped, args, prompt=f"{HARNESS_LABEL} {tool_name}", danger_desc=summary,
+                                run_ticket=ticket, action_area=area_hint, delegation_chain=chain)
 
     if auth.get("skip"):
         if cfg["fail_closed"]:
@@ -514,6 +565,7 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
         args=args,
         action_summary=summary,
         auth=auth,
+        delegation_chain=chain,
         ttl=int(cfg["attest_timeout"]),
     )
     if not att_id:
