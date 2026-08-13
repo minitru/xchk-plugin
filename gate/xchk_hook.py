@@ -23,8 +23,8 @@ Security posture:
   - HTTPS is required; set XCHK_ALLOW_INSECURE=1 only for local development.
   - Tool input from the model is treated as data: it is JSON-encoded to the
     server, never shell-interpolated, and stdin is size-capped.
-  - XCHK_FAIL_CLOSED=1 denies gated tools when the license server is
-    unreachable (the licensing default; off here so a dev box degrades safely).
+  - Fail-closed is the default: gated tools are denied when the license
+    server is unreachable. Set XCHK_FAIL_CLOSED=0 to degrade open on a dev box.
 """
 
 from __future__ import annotations
@@ -123,10 +123,11 @@ SESSION_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
 
 # Harness tool -> xchk authorize vocabulary. Claude Code and Cursor happen to
 # agree on Read/Write/Edit; Cursor calls the terminal "Shell". A name absent
-# here is UNGATED, so this table is the coverage boundary: Cursor's editor
-# surface is only proven for Write, and any further edit tool it ships (under
-# whatever name) passes unauthorized until it is added and probed. Per-area
-# coverage, not per-harness — see docs/multi-harness-runs.md.
+# here is no longer ungated: unknown tools fall through to CATCHALL_WIRE and
+# are authorized under the license like everything else (grants decide the
+# disposition; an unconfigured area lands on the default, attest). Only names
+# in UNGATED_TOOLS bypass the gate. Per-area coverage, not per-harness — see
+# docs/multi-harness-runs.md.
 TOOL_MAP = {
     "Bash": "terminal",
     "Shell": "terminal",          # Cursor
@@ -151,6 +152,21 @@ TOOL_MAP = {
 # lands on the record in the registry's own vocabulary.
 SPAWN_TOOLS = {"Task", "Agent", "Workflow"}
 SPAWN_AREA = "operations"
+
+# The coverage boundary, inverted: names listed here are the ONLY tools that
+# bypass the license. Read-only introspection and harness bookkeeping — the
+# harness asking the model questions or the model asking the human — where a
+# plate on the record would be noise no approver could adjudicate. Everything
+# else (MCP tools, WebFetch/WebSearch, tools shipped after this file) goes to
+# the server under CATCHALL_WIRE with the raw tool name and a truncated input
+# preview, so an email connector is gated the day it appears, not the day
+# someone remembers to map it.
+UNGATED_TOOLS = {
+    "Glob", "Grep", "LS", "TodoWrite", "TodoRead", "AskUserQuestion",
+    "BashOutput", "KillBash", "EnterPlanMode", "ExitPlanMode",
+    "Skill", "SlashCommand", "ToolSearch",
+}
+CATCHALL_WIRE = "tool"
 
 # Harness bookkeeping that arrives through the model's own Write tool. Cursor
 # writes agent scratch to ~/.cursor/projects/<slug>/agent-tools/<uuid>.txt, and
@@ -222,7 +238,7 @@ def load_config() -> dict:
     for k, v in env.items():
         if v not in (None, ""):
             cfg[k] = v
-    cfg["fail_closed"] = str(cfg.get("fail_closed", "0")).lower() in ("1", "true", "yes")
+    cfg["fail_closed"] = str(cfg.get("fail_closed", "1")).lower() in ("1", "true", "yes")
     try:
         cfg["attest_timeout"] = float(cfg.get("attest_timeout", 600))
     except (TypeError, ValueError):
@@ -467,6 +483,16 @@ def summarize(tool_name: str, tool_input: dict) -> str:
         what = str(tool_input.get("description") or tool_input.get("prompt")
                    or tool_input.get("script") or "").strip()
         return f"spawn subagent{f' [{kind}]' if kind else ''}: {what}"[:300]
+    if tool_name not in TOOL_MAP:
+        # Catch-all tools (MCP connectors, WebFetch, anything unmapped): show
+        # the most intent-bearing field so the approver adjudicates an action,
+        # not a bare tool name.
+        what = str(tool_input.get("url") or tool_input.get("query")
+                   or tool_input.get("command") or tool_input.get("prompt")
+                   or tool_input.get("description") or "").strip()
+        if not what:
+            what = ", ".join(f"{k}={str(v)[:40]}" for k, v in list(tool_input.items())[:4])
+        return f"{tool_name}: {what}"[:300]
     path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
     return f"{tool_name} {path}"[:300]
 
@@ -494,7 +520,9 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
         tool_input = {}
     mapped = TOOL_MAP.get(tool_name)
     if not mapped:
-        sys.exit(0)  # ungated tool — defer to normal permission flow
+        if tool_name in UNGATED_TOOLS:
+            sys.exit(0)  # explicitly ungated — defer to normal permission flow
+        mapped = CATCHALL_WIRE  # unknown tool: gate it, let grants decide
 
     target = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
     if mapped != "terminal" and target and INTERNAL_PATH_RE.search(target):
@@ -502,7 +530,7 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
 
     if not client.configured:
         if cfg["fail_closed"]:
-            decide("deny", "xchk: license client not configured and XCHK_FAIL_CLOSED is set")
+            decide("deny", "xchk: license client not configured — failing closed (set XCHK_FAIL_CLOSED=0 to degrade open)")
         sys.exit(0)
 
     session_id = data.get("session_id") or ""
@@ -515,6 +543,15 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
         args["command"] = str(tool_input.get("command") or "")
     elif mapped == "spawn_agent":
         args["prompt"] = str(tool_input.get("prompt") or tool_input.get("script") or "")[:500]
+    elif mapped == CATCHALL_WIRE:
+        # The raw name plus a bounded input preview: enough for server-side
+        # area inference and for an approver to adjudicate, never the full
+        # (possibly huge, possibly secret-bearing) tool input.
+        args["tool"] = tool_name
+        try:
+            args["input"] = json.dumps(tool_input, default=str)[:500]
+        except (TypeError, ValueError):
+            args["input"] = str(tool_input)[:500]
     else:
         args["path"] = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
 
