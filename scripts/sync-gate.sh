@@ -8,7 +8,10 @@
 #   2. git commit
 #   3. git tag -s vX.Y.Z -m "xchk-plugin vX.Y.Z"   # SIGNED tag, always
 #   4. git push --follow-tags
-#   5. Installs pin the tag: `hermes plugins install minitru/xchk-plugin@vX.Y.Z`;
+#   5. XCHK_ADMIN_TOKEN=... ./scripts/publish-release.sh   # known-good manifest
+#      to the registry. Without this the gate's self-hash has nothing to be
+#      contradicted against, and every install reports 'unknown-version'.
+#   6. Installs pin the tag: `hermes plugins install minitru/xchk-plugin@vX.Y.Z`;
 #      Claude marketplace entries reference the tagged commit SHA. Never main.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
