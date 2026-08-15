@@ -90,9 +90,30 @@ print(f"  manifestSha: {o['manifestSha']}")
 print(f"  files: {o['files']}")
 PY
        ;;
-  409) # Already published. Not worth failing a release over, but loud: this
-       # version's known-good copy was set by an earlier run, and THAT is what
-       # installs are being checked against.
-       echo "  already published (409) — the existing record stands:"; cat "$OUT"; echo ;;
+  409) # Already published — but WHICH already-published matters enormously.
+       #
+       # Same bytes: a repeat run, nothing to do, exit clean.
+       #
+       # Different bytes: the version on the shelf is not the version being
+       # built. Every install of it would report a mismatch against a manifest
+       # that was never wrong, and the honest reading is that this version
+       # number has been reused for two different builds. That is a release
+       # error, not a publish error, so it fails loudly rather than shrugging.
+       PUBLISHED="$(curl -sS "${BASE%/}/api/gate-releases/${HARNESS}/${VERSION}" \
+                    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("manifestSha",""))' 2>/dev/null || true)"
+       LOCAL="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$MANIFEST")"
+       if [[ -n "$PUBLISHED" && "$PUBLISHED" == "$LOCAL" ]]; then
+         echo "  already published, and identical ($LOCAL)"
+         echo "  nothing to do."
+         exit 0
+       fi
+       echo "  ALREADY PUBLISHED WITH DIFFERENT BYTES — this is a release error." >&2
+       echo "    on the shelf : ${PUBLISHED:-<could not read>}" >&2
+       echo "    building     : $LOCAL" >&2
+       echo "  $HARNESS $VERSION already means something else. Every install of" >&2
+       echo "  this build would report a mismatch against a manifest that was" >&2
+       echo "  never wrong. Bump PLUGIN_VERSION and re-release; do not try to" >&2
+       echo "  overwrite what shipped." >&2
+       exit 1 ;;
   *)   echo "  FAILED $CODE:" >&2; cat "$OUT" >&2; echo >&2; exit 1 ;;
 esac
