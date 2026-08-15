@@ -22,7 +22,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BASE="${XCHK_BASE:-https://in.xchk.io}"
 HARNESS="${1:-claude}"
-MANIFEST="$ROOT/MANIFEST.sha256"
+MANIFEST="${MANIFEST_OVERRIDE:-$ROOT/MANIFEST.sha256}"
+VARIANT="${VARIANT:-plugin}"
 
 [[ -f "$MANIFEST" ]] || { echo "no MANIFEST.sha256 — run ./scripts/sync-gate.sh first" >&2; exit 1; }
 [[ -n "${XCHK_ADMIN_TOKEN:-}" ]] || {
@@ -47,7 +48,7 @@ fi
 TAG="$(git -C "$ROOT" describe --tags --exact-match 2>/dev/null || true)"
 [[ -n "$TAG" ]] || echo "warning: HEAD is not tagged; publishing anyway with sourceTag=null" >&2
 
-echo "publishing $HARNESS $VERSION${TAG:+ ($TAG)} to $BASE"
+echo "publishing $HARNESS $VERSION [$VARIANT]${TAG:+ ($TAG)} to $BASE"
 
 # Python builds the JSON — it has to, because the manifest is multi-line text
 # that must be escaped exactly — but curl does the transport.
@@ -60,13 +61,14 @@ echo "publishing $HARNESS $VERSION${TAG:+ ($TAG)} to $BASE"
 # everywhere else in this stack.
 BODY="$(mktemp)"; trap 'rm -f "$BODY"' EXIT
 python3 - "$MANIFEST" "$HARNESS" "$VERSION" "$TAG" > "$BODY" <<'PY'
-import json, sys
+import json, os, sys
 manifest_path, harness, version, tag = sys.argv[1:5]
 sys.stdout.write(json.dumps({
     "harness": harness,
     "pluginVersion": version,
     "manifest": open(manifest_path, encoding="utf-8").read(),  # RAW: hashed as-is
     "sourceTag": tag or None,
+    "variant": os.environ.get("VARIANT", "plugin"),
 }))
 PY
 
@@ -99,7 +101,7 @@ PY
        # that was never wrong, and the honest reading is that this version
        # number has been reused for two different builds. That is a release
        # error, not a publish error, so it fails loudly rather than shrugging.
-       PUBLISHED="$(curl -sS "${BASE%/}/api/gate-releases/${HARNESS}/${VERSION}" \
+       PUBLISHED="$(curl -sS "${BASE%/}/api/gate-releases/${HARNESS}/${VERSION}?variant=${VARIANT}" \
                     | python3 -c 'import json,sys; print(json.load(sys.stdin).get("manifestSha",""))' 2>/dev/null || true)"
        LOCAL="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$MANIFEST")"
        if [[ -n "$PUBLISHED" && "$PUBLISHED" == "$LOCAL" ]]; then
