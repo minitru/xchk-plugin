@@ -84,6 +84,12 @@ PLUGIN_VERSION = "0.1.2"
 MAX_STDIN_BYTES = 512 * 1024
 
 
+# Written into the manifest header by the install scripts. Its presence means
+# the manifest was generated on this host from files already on disk, so it
+# cannot attest to issuer provenance — only to stability since install.
+INSTALL_TIME_MANIFEST_MARKER = "provenance: install-time"
+
+
 def gate_integrity() -> dict:
     """Self-hash the gate against MANIFEST.sha256 at the plugin root.
 
@@ -103,8 +109,19 @@ def gate_integrity() -> dict:
         return {"gateIntegrity": "unmanifested"}
     try:
         raw = manifest.read_bytes()
-        status = "verified"
-        for line in raw.decode().splitlines():
+        text = raw.decode()
+        # A manifest minted at INSTALL time hashes whatever arrived — including a
+        # tampered download — so matching it proves only "unchanged since install",
+        # never "matches what the issuer released". Reporting that as "verified"
+        # is a false green: the console shows the strongest word for the weakest
+        # claim. Such manifests carry an explicit provenance marker (written by
+        # install-*-xchk.sh) and are reported as "self-manifested" instead —
+        # still useful (it catches post-install tampering), just not a release
+        # claim. See make-manifest.py, which forbids install-time generation for
+        # this reason.
+        self_minted = INSTALL_TIME_MANIFEST_MARKER in text
+        status = "self-manifested" if self_minted else "verified"
+        for line in text.splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
@@ -175,6 +192,87 @@ CATCHALL_WIRE = "tool"
 # operator could adjudicate. Deferred to the harness's own permission flow,
 # never recorded as an allow: it is not the agent acting on the user's work.
 INTERNAL_PATH_RE = re.compile(r"/\.cursor/projects/[^/]+/agent-tools/")
+
+# ── Gate self-protection ──────────────────────────────────────────────────────
+# A grant is authority over the USER'S work, never over the gate itself. With
+# disposition "allow" on the files or terminal area, one Write to
+# ~/.xchk/claude.json (or an `echo XCHK_FAIL_CLOSED=0 >> ~/.zshrc`) silently
+# disarms or redirects the gate at the next session start. Gate-critical paths
+# are therefore hard-denied BEFORE grant evaluation — no grant, no approver,
+# and no fail-open setting authorizes the agent to touch them. Changing them
+# is done from a shell the agent does not drive.
+
+SHELL_INIT_NAMES = (
+    ".zshrc", ".zshenv", ".zprofile", ".zlogin",
+    ".bashrc", ".bash_profile", ".bash_login", ".profile",
+)
+# Distinctive enough to deny by basename wherever they live: the repo
+# checkout, the installed copy, or a staged copy about to be swapped in.
+GATE_FILE_NAMES = ("xchk_hook.py", "xchk_client.py")
+# Env vars that would disarm or redirect the gate in a future session.
+GATE_ENV_NAMES = ("XCHK_FAIL_CLOSED", "XCHK_CONFIG", "XCHK_STATE_DIR",
+                  "XCHK_BASE", "XCHK_ALLOW_INSECURE")
+
+
+def protected_roots() -> list:
+    """Files and directory prefixes no grant may authorize modification of.
+    Computed per call, after apply_harness(): STATE_DIR and CONFIG_PATH honour
+    their env overrides, so a redirected config is protected at its real
+    location, not just the default one."""
+    home = Path.home()
+    return [
+        home / ".xchk",                            # config, tickets, installed gate
+        PLUGIN_ROOT,                               # this checkout of the gate
+        STATE_DIR, CONFIG_PATH,                    # env-overridden locations too
+        home / ".claude" / "settings.json",        # hook registration + env
+        home / ".claude" / "settings.local.json",
+        home / ".cursor" / "settings.json",        # Cursor-side registration
+        home / ".cursor" / "hooks.json",
+        *(home / n for n in SHELL_INIT_NAMES),     # future-session environment
+    ]
+
+
+def _resolve(path) -> Path:
+    """expanduser + realpath: symlinks and ../ hops land on the real target,
+    and realpath tolerates a nonexistent tail (a Write creating the file)."""
+    try:
+        return Path(os.path.realpath(Path(str(path)).expanduser()))
+    except (OSError, ValueError):
+        return Path(str(path))
+
+
+def is_protected_path(target: str) -> bool:
+    if not target:
+        return False
+    t = _resolve(target)
+    if t.name in GATE_FILE_NAMES:
+        return True
+    return any(t == r or r in t.parents for r in map(_resolve, protected_roots()))
+
+
+_BOUNDARY = r"(?:^|[\s\"'=:;|&(<>`])"
+
+
+def bash_screen():
+    """Spelling screen for shell commands. The command is an opaque string —
+    the shell expands it, not us — so this matches SPELLINGS of the protected
+    set (absolute, ~/, $HOME/, ${HOME}/ forms, bare basenames after a word
+    boundary) plus the gate's env var names. Deliberately over-broad: a
+    `cat ~/.zshrc` is denied alongside an `echo ... >> ~/.zshrc`, because
+    read vs write cannot be told apart in an unparsed string, and ~/.xchk
+    holds the API key besides. Fail-safe wins; the denial reason says why."""
+    home = str(Path.home())
+    forms = set(GATE_FILE_NAMES) | set(SHELL_INIT_NAMES) | set(GATE_ENV_NAMES)
+    forms.add(".xchk")
+    for root in protected_roots():
+        s = str(root)
+        forms.add(s)
+        if s.startswith(home):
+            rel = s[len(home):]
+            forms.update(("~" + rel, "$HOME" + rel, "${HOME}" + rel))
+    alts = "|".join(sorted(map(re.escape, forms), key=len, reverse=True))
+    return re.compile(_BOUNDARY + "(?:" + alts + ")")
+
 
 # Wire name -> display name. The wire name keys the install slot, so a harness
 # missing here would silently share Claude's slot; resolve_harness() defaults
@@ -525,6 +623,20 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
         mapped = CATCHALL_WIRE  # unknown tool: gate it, let grants decide
 
     target = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
+
+    # Gate self-protection: hard deny BEFORE any grant is consulted, and
+    # before the configured/fail-open branch — an unlicensed dev box still
+    # refuses to let the agent rewrite the gate. See "Gate self-protection".
+    if mapped in ("write_file", "patch") and is_protected_path(target):
+        decide("deny", f"xchk: '{target}' is gate-critical (gate code/config, hook registration, or shell init) — no grant authorizes modifying the gate")
+    if mapped == "terminal" and bash_screen().search(str(tool_input.get("command") or "")):
+        decide("deny", "xchk: command references gate-critical paths or gate env vars (~/.xchk, gate code, hook registration, shell init, XCHK_*) — no grant authorizes this; run it from a shell the agent does not drive")
+    if mapped == "read_file" and target:
+        t = _resolve(target)
+        if any(t == r or r in t.parents
+               for r in map(_resolve, (Path.home() / ".xchk", CONFIG_PATH, STATE_DIR))):
+            decide("deny", "xchk: ~/.xchk holds the license key and run tickets — never readable by the agent")
+
     if mapped != "terminal" and target and INTERNAL_PATH_RE.search(target):
         sys.exit(0)  # harness's own scratch — see INTERNAL_PATH_RE
 
