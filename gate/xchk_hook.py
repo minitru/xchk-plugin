@@ -80,7 +80,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None):
         except Exception:
             pass
 
-PLUGIN_VERSION = "0.1.3"
+PLUGIN_VERSION = "0.1.4"
 MAX_STDIN_BYTES = 512 * 1024
 
 
@@ -534,6 +534,94 @@ def decide(decision: str, reason: str) -> None:
     sys.exit(0)
 
 
+RUNS_DIR = Path("~/.xchk/runs").expanduser()
+
+
+def stamp_terminal_title(run: dict | None) -> None:
+    """Put the run ref in the terminal title.
+
+    The console can tell you FIN-RKPC.104 is the busy plate; nothing on the
+    machine could tell you which window that was, so the answer involved
+    correlating pids. The title bar is where a human already looks to identify
+    a window.
+
+    Writes to the controlling TTY, never stdout: stdout carries this hook's
+    JSON protocol back to the harness, and an escape sequence in it corrupts
+    the gate's own response. Failure is silent by design — a cosmetic title
+    must never be able to affect a gate decision.
+    """
+    ref = (run or {}).get("runRef")
+    if not ref:
+        return
+    try:
+        with open("/dev/tty", "w") as tty:
+            tty.write(f"\033]2;{ref} · {HARNESS_LABEL}\007")   # window title
+            tty.write(f"\033]1;{ref}\007")                     # tab / icon title
+            tty.flush()
+    except OSError:
+        pass          # no controlling tty: daemon, CI, piped — nothing to title
+    if os.environ.get("TMUX"):
+        try:
+            import subprocess
+            subprocess.run(["tmux", "rename-window", ref],
+                           timeout=2, capture_output=True, check=False)
+        except Exception:
+            pass
+
+
+def write_run_file(run: dict | None, cfg: dict) -> None:
+    """Declare this session's plate binding on disk, for the fleet manager.
+
+    Replaces inference. xchk_manager.scan_running() reconstructs which plate a
+    process belongs to by string-matching `ps -axo command` for '-p <profile>
+    chat', and _default_profile_holder() resolves the bare session by matching
+    an API key on disk to an install. Both are guesses at a fact this process
+    already knows, and the manager's own comments say the failure mode is
+    reporting a live agent as idle — the console contradicting the machine.
+
+    The harness owns the session; this hook is invoked per-event and exits, so
+    the pid recorded is the PARENT — the long-lived harness process — not our
+    own. A run file naming a dead helper is worse than no run file.
+
+    Exception-safe throughout: this is bookkeeping for another process, and it
+    must never be able to fail a SessionStart.
+    """
+    ref = (run or {}).get("runRef")
+    if not ref:
+        return
+    try:
+        RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        pid = os.getppid()
+        payload = {
+            "runRef": ref,
+            "plate": (run or {}).get("plate"),
+            "profile": cfg.get("profile") or "default",
+            "harness": HARNESS,
+            "pid": pid,
+            "tty": os.ttyname(0) if os.isatty(0) else None,
+            "cwd": os.getcwd(),
+            "host": socket.gethostname().split(".")[0],
+            "startedAt": time.time(),
+        }
+        # Atomic: a reader must never catch a half-written file and conclude
+        # the binding is malformed.
+        tmp = RUNS_DIR / f".{pid}.tmp"
+        tmp.write_text(json.dumps(payload))
+        tmp.replace(RUNS_DIR / f"{pid}.json")
+    except Exception:
+        pass
+
+
+def drop_run_file() -> None:
+    """Remove this session's run file. Best-effort only — a kill -9 or a crash
+    leaves it behind, so readers must still check whether the pid is alive
+    rather than trusting the file's existence."""
+    try:
+        (RUNS_DIR / f"{os.getppid()}.json").unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def on_session_start(data: dict, cfg: dict, client: XchkClient) -> None:
     if not client.configured:
         return
@@ -559,6 +647,8 @@ def on_session_start(data: dict, cfg: dict, client: XchkClient) -> None:
     # Written every session but no-ops unless the value changed, so it settles
     # after the first dispatch and stays put.
     stamp_license_header((run or {}).get("plate"))
+    stamp_terminal_title(run)
+    write_run_file(run, cfg)
     if run and run.get("runRef"):
         emit("SessionStart", {
             "additionalContext": (
@@ -765,6 +855,7 @@ def on_session_end(data: dict, client: XchkClient) -> None:
     if r and client.configured:
         r.flush(client, run_ref=(run or {}).get("runRef"), force_empty=True)
     drop_run(session_id)
+    drop_run_file()
 
 
 def main() -> None:
