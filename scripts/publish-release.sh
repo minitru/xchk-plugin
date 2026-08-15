@@ -78,7 +78,18 @@ CODE="$(curl -sS -o "$OUT" -w '%{http_code}' -X POST \
   "${BASE%/}/api/gate-releases")"
 
 case "$CODE" in
-  201) python3 -c 'import json,sys; o=json.load(open(sys.argv[1])); print(f"  published: {o[\"harness\"]} {o[\"pluginVersion\"]}\n  manifestSha: {o[\"manifestSha\"]}\n  files: {o[\"files\"]}")' "$OUT" ;;
+  # Heredoc, not python3 -c: inside bash single quotes a \" stays a literal
+  # backslash-quote, and Python rejects it inside an f-string expression. The
+  # POST had already succeeded when this blew up, which is the worst kind of
+  # reporting bug — it says "failed" about something that worked.
+  201) python3 - "$OUT" <<'PY'
+import json, sys
+o = json.load(open(sys.argv[1]))
+print(f"  published: {o['harness']} {o['pluginVersion']}")
+print(f"  manifestSha: {o['manifestSha']}")
+print(f"  files: {o['files']}")
+PY
+       ;;
   409) # Already published. Not worth failing a release over, but loud: this
        # version's known-good copy was set by an earlier run, and THAT is what
        # installs are being checked against.
