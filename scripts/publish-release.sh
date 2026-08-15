@@ -48,34 +48,40 @@ TAG="$(git -C "$ROOT" describe --tags --exact-match 2>/dev/null || true)"
 [[ -n "$TAG" ]] || echo "warning: HEAD is not tagged; publishing anyway with sourceTag=null" >&2
 
 echo "publishing $HARNESS $VERSION${TAG:+ ($TAG)} to $BASE"
-python3 - "$MANIFEST" "$HARNESS" "$VERSION" "$TAG" "$BASE" <<'PY'
-import json, os, sys, urllib.request, urllib.error
-manifest_path, harness, version, tag, base = sys.argv[1:6]
-raw = open(manifest_path, encoding="utf-8").read()
-body = json.dumps({
+
+# Python builds the JSON — it has to, because the manifest is multi-line text
+# that must be escaped exactly — but curl does the transport.
+#
+# urllib was doing both, and that made the release depend on the local Python
+# having a CA bundle. python.org's framework build on macOS does not use the
+# system keychain, so it fails with CERTIFICATE_VERIFY_FAILED until someone
+# runs "Install Certificates.command". A release step is the wrong place to
+# discover that; curl uses the system trust store and is already assumed
+# everywhere else in this stack.
+BODY="$(mktemp)"; trap 'rm -f "$BODY"' EXIT
+python3 - "$MANIFEST" "$HARNESS" "$VERSION" "$TAG" > "$BODY" <<'PY'
+import json, sys
+manifest_path, harness, version, tag = sys.argv[1:5]
+sys.stdout.write(json.dumps({
     "harness": harness,
     "pluginVersion": version,
-    "manifest": raw,                       # RAW text: the hash is of these bytes
+    "manifest": open(manifest_path, encoding="utf-8").read(),  # RAW: hashed as-is
     "sourceTag": tag or None,
-}).encode()
-req = urllib.request.Request(
-    base.rstrip("/") + "/api/gate-releases", data=body, method="POST",
-    headers={"Content-Type": "application/json",
-             "Authorization": "Bearer " + os.environ["XCHK_ADMIN_TOKEN"]})
-try:
-    with urllib.request.urlopen(req, timeout=20) as r:
-        out = json.load(r)
-    print(f"  published: {out['harness']} {out['pluginVersion']}")
-    print(f"  manifestSha: {out['manifestSha']}")
-    print(f"  files: {out['files']}")
-except urllib.error.HTTPError as e:
-    detail = e.read().decode(errors="replace")
-    if e.code == 409:
-        # Already published. Not an error worth failing a release over, but it
-        # must be loud: it means this version's known-good copy was set by an
-        # earlier run, and THAT is what installs are being checked against.
-        print(f"  already published (409) — the existing record stands: {detail}")
-        sys.exit(0)
-    print(f"  FAILED {e.code}: {detail}", file=sys.stderr)
-    sys.exit(1)
+}))
 PY
+
+OUT="$(mktemp)"; trap 'rm -f "$BODY" "$OUT"' EXIT
+CODE="$(curl -sS -o "$OUT" -w '%{http_code}' -X POST \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer ${XCHK_ADMIN_TOKEN}" \
+  --data-binary "@$BODY" \
+  "${BASE%/}/api/gate-releases")"
+
+case "$CODE" in
+  201) python3 -c 'import json,sys; o=json.load(open(sys.argv[1])); print(f"  published: {o[\"harness\"]} {o[\"pluginVersion\"]}\n  manifestSha: {o[\"manifestSha\"]}\n  files: {o[\"files\"]}")' "$OUT" ;;
+  409) # Already published. Not worth failing a release over, but loud: this
+       # version's known-good copy was set by an earlier run, and THAT is what
+       # installs are being checked against.
+       echo "  already published (409) — the existing record stands:"; cat "$OUT"; echo ;;
+  *)   echo "  FAILED $CODE:" >&2; cat "$OUT" >&2; echo >&2; exit 1 ;;
+esac
