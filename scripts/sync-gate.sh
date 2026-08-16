@@ -33,7 +33,7 @@ COVERED = sorted([
     *root.glob("cursor/*.py"),
     root / "hooks/hooks.json",
     root / "mcp/xchk_mcp.py",
-    root / "skills/xchk-adopt/SKILL.md",
+    *sorted(root.glob("skills/*/SKILL.md")),
     root / ".claude-plugin/plugin.json",
     root / "plugin.json",
     root / "mcp.json",
