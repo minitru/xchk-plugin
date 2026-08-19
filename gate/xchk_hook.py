@@ -80,7 +80,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None):
         except Exception:
             pass
 
-PLUGIN_VERSION = "0.1.5"
+PLUGIN_VERSION = "0.1.6"
 MAX_STDIN_BYTES = 512 * 1024
 
 
@@ -232,6 +232,32 @@ def protected_roots() -> list:
     ]
 
 
+def screened_roots() -> list:
+    """Roots whose SPELLING is denied inside an unparsed shell command.
+
+    Narrower than protected_roots() by exactly one member: PLUGIN_ROOT. The
+    checkout holds no key and enforces nothing — it becomes the gate only
+    through a signed install, which re-manifests it. Screening it denied
+    `git log`, `ls`, and `grep` in the repo, i.e. the ordinary work of
+    maintaining the gate, and a screen that fires on innocent commands is the
+    fastest way to get the gate switched off.
+
+    Write/Edit denial is UNCHANGED: is_protected_path() still consults
+    protected_roots(), and GATE_FILE_NAMES still denies the gate files by
+    basename wherever they are written.
+
+    Known and accepted: a command reaching the checkout by glob without naming
+    the files (`sed -i '' s/x/y/ .../gate/*.py`) now passes the screen. The
+    checkout is not the gate; gate_integrity() reports "modified" if a tampered
+    copy is ever installed. Tamper-evident, never tamper-proof.
+
+    Computed per call, like protected_roots(): do NOT memoise. An env-redirected
+    CONFIG_PATH/STATE_DIR must be screened at its real location.
+    """
+    plugin = _resolve(PLUGIN_ROOT)
+    return [r for r in protected_roots() if _resolve(r) != plugin]
+
+
 def _resolve(path) -> Path:
     """expanduser + realpath: symlinks and ../ hops land on the real target,
     and realpath tolerates a nonexistent tail (a Write creating the file)."""
@@ -264,7 +290,7 @@ def bash_screen():
     home = str(Path.home())
     forms = set(GATE_FILE_NAMES) | set(SHELL_INIT_NAMES) | set(GATE_ENV_NAMES)
     forms.add(".xchk")
-    for root in protected_roots():
+    for root in screened_roots():
         s = str(root)
         forms.add(s)
         if s.startswith(home):
@@ -333,15 +359,66 @@ def load_config() -> dict:
         "fail_closed": os.environ.get("XCHK_FAIL_CLOSED"),
         "attest_timeout": os.environ.get("XCHK_ATTEST_TIMEOUT"),
     }
+    file_fail_closed = cfg.get("fail_closed")
     for k, v in env.items():
         if v not in (None, ""):
             cfg[k] = v
     cfg["fail_closed"] = str(cfg.get("fail_closed", "1")).lower() in ("1", "true", "yes")
+    _record_posture(cfg["fail_closed"], env.get("fail_closed"), file_fail_closed)
     try:
         cfg["attest_timeout"] = float(cfg.get("attest_timeout", 600))
     except (TypeError, ValueError):
         cfg["attest_timeout"] = 600.0
     return cfg
+
+
+def _record_posture(effective: bool, env_value, file_value) -> None:
+    """Record the fail-closed value the gate ACTUALLY enforced, and its source.
+
+    The registry cannot learn this any other way. Only this process sees the
+    environment the harness handed it, which is exactly the channel a shell-rc
+    disarm travels on — so a value derived anywhere else would report the
+    config file's claim rather than the enforced truth, and a console that
+    reports a claim as if it were enforcement is worse than one that reports
+    nothing.
+
+    Written on change only: the hook runs on every gated tool call, and this
+    would otherwise be a disk write per call for a value that moves about once
+    a quarter.
+    """
+    source = ("env" if env_value not in (None, "")
+              else "config" if file_value is not None
+              else "default")
+    posture = {
+        "fail_closed": bool(effective),
+        "source": source,
+        # Kept apart from the effective value so the console can say "config
+        # says closed, environment says open" — the state worth shouting
+        # about, and the one a single boolean hides.
+        "config_fail_closed": (None if file_value is None
+                               else str(file_value).lower() in ("1", "true", "yes")),
+        "env_fail_closed": (None if env_value in (None, "")
+                            else str(env_value).lower() in ("1", "true", "yes")),
+    }
+    try:
+        path = STATE_DIR / "posture.json"
+        if path.exists():
+            try:
+                prior = json.loads(path.read_text())
+                if {k: prior.get(k) for k in posture} == posture:
+                    return
+            except (OSError, ValueError):
+                pass
+        from datetime import datetime, timezone
+        posture["at"] = datetime.now(timezone.utc).isoformat()
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(posture, sort_keys=True))
+        tmp.replace(path)
+        path.chmod(0o600)
+    except OSError:
+        # Never fail a tool call to record telemetry about a tool call.
+        pass
 
 
 def make_client(cfg: dict) -> XchkClient:
