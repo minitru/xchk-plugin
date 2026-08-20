@@ -18,6 +18,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${XCHK_APP:-/Volumes/2TB-FAST/sean-overflow/src/xchk/xchk-app}/examples/claude-attestation-guardrails"
 cp "$SRC/hooks/xchk_hook.py" "$ROOT/gate/xchk_hook.py"
 cp "$SRC/xchk_client.py" "$ROOT/gate/xchk_client.py"
+cp "$SRC/xchk_labels.py" "$ROOT/gate/xchk_labels.py"
 python3 - "$ROOT" <<'EOF'
 import ast, hashlib, pathlib, sys
 root = pathlib.Path(sys.argv[1])

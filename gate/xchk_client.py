@@ -101,6 +101,7 @@ class XchkClient:
         run_ticket: Optional[str] = None,
         action_area: Optional[str] = None,
         delegation_chain: Optional[list] = None,
+        labels: Optional[list] = None,
     ) -> Dict[str, Any]:
         """POST /api/agents/authorize. Returns disposition or skip for legacy keys."""
         if not self.configured:
@@ -124,6 +125,12 @@ class XchkClient:
         # which is part of the server's paramsHash.
         if delegation_chain:
             body["delegationChain"] = delegation_chain
+        # What the gate detected in what this call would write, run, or send.
+        # Sent ONLY when something was found: an empty array would assert
+        # "examined and found clean", which is a stronger claim than a
+        # precision-first inline tier is entitled to make.
+        if labels:
+            body["labels"] = labels
         if tool_name == "terminal":
             body["command"] = normalize_terminal_command(args.get("command") or "")
         elif tool_name in ("write_file", "patch", "read_file"):

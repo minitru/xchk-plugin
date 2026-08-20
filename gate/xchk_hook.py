@@ -46,6 +46,10 @@ try:
     from xchk_client import LocalRecorder  # noqa: E402
 except Exception:  # pragma: no cover
     LocalRecorder = None
+try:
+    from xchk_labels import classify_tool_input  # noqa: E402
+except Exception:  # pragma: no cover - classification never breaks the gate
+    classify_tool_input = None
 
 _LOCAL_CHAIN_PATH = str(PLUGIN_ROOT / "local-chain.json")
 
@@ -839,9 +843,20 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
     area_hint = SPAWN_AREA if mapped == "spawn_agent" else None
     chain = parent_chain(run) if mapped == "spawn_agent" else None
 
+    # Tier 1 classification, in-process (docs/label-pipeline.md). Degrades to
+    # "detected nothing" — never to "clean" — if the module is absent or raises.
+    labels = []
+    if classify_tool_input is not None:
+        try:
+            labels = classify_tool_input(tool_input)
+        except Exception:
+            labels = []
+    label_note = f" [{', '.join(l['label'] for l in labels)}]" if labels else ""
+
     summary = summarize(tool_name, tool_input)
     auth = client.authorize(mapped, args, prompt=f"{HARNESS_LABEL} {tool_name}", danger_desc=summary,
-                            run_ticket=ticket, action_area=area_hint, delegation_chain=chain)
+                            run_ticket=ticket, action_area=area_hint,
+                            delegation_chain=chain, labels=labels)
 
     # Renew, don't refuse: an aged-out ticket on a live plate means only the
     # clock ran out, so re-dispatch for THIS session and carry on. A wrong or
@@ -855,7 +870,8 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
         run_ref = (run or {}).get("runRef") or run_ref
         chain = parent_chain(run) if mapped == "spawn_agent" else None
         auth = client.authorize(mapped, args, prompt=f"{HARNESS_LABEL} {tool_name}", danger_desc=summary,
-                                run_ticket=ticket, action_area=area_hint, delegation_chain=chain)
+                                run_ticket=ticket, action_area=area_hint,
+                                delegation_chain=chain, labels=labels)
 
     if auth.get("skip"):
         if cfg["fail_closed"]:
@@ -875,7 +891,7 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
         decide("ask", f"xchk: area {area} requires attestation and no remote approver is configured — asking locally")
 
     att_id, err = client.create_attestation(
-        prompt=f"{run_ref} (via {HARNESS_LABEL}) wants to {summary or tool_name}",
+        prompt=f"{run_ref} (via {HARNESS_LABEL}) wants to {summary or tool_name}{label_note}",
         target_email=approver,
         tool_name=mapped,
         args=args,
