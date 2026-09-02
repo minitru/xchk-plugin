@@ -910,6 +910,133 @@ def parent_chain(run: dict | None) -> list | None:
     }]
 
 
+
+# ===== xChk engine-block + destructive-fs (applied by apply-engine-block.py) =====
+import re as _xk_re
+import shlex as _xk_shlex
+
+_XK_CTX_WINDOWS = [("[1m]", 1_000_000), ("-1m", 1_000_000)]
+_XK_CTX_DEFAULT = 200_000
+_XK_TAIL_BYTES = 512 * 1024
+
+
+def _xk_ctx_window(model):
+    m = (model or "").lower()
+    for marker, size in _XK_CTX_WINDOWS:
+        if marker in m:
+            return size
+    return _XK_CTX_DEFAULT
+
+
+def model_telemetry(hook_input):
+    try:
+        path = (hook_input or {}).get("transcript_path")
+        if not path or not os.path.isfile(path):
+            return {}
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - _XK_TAIL_BYTES))
+            tail = f.read().decode("utf-8", "replace")
+        best = None
+        for line in reversed(tail.splitlines()):
+            line = line.strip()
+            if not line or '"assistant"' not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            msg = row.get("message") or {}
+            usage = msg.get("usage") or {}
+            if msg.get("model") and usage.get("input_tokens") is not None:
+                best = (msg["model"], usage)
+                break
+        if not best:
+            return {}
+        model, usage = best
+        t_in = int(usage.get("input_tokens") or 0)
+        t_out = int(usage.get("output_tokens") or 0)
+        t_cache = int(usage.get("cache_read_input_tokens") or 0)
+        t_create = int(usage.get("cache_creation_input_tokens") or 0)
+        used = t_in + t_cache + t_create
+        ctx = max(0, min(100, round(used * 100 / _xk_ctx_window(model))))
+        return {"model": str(model)[:64], "tokensIn": t_in, "tokensOut": t_out,
+                "tokensCacheRead": t_cache, "contextPct": ctx}
+    except Exception:
+        return {}
+
+
+_XK_SCRATCH = ("/tmp/", "/private/tmp/", "/var/folders/", "/dev/null")
+_XK_DESTRUCTIVE = [_xk_re.compile(r"^rm$"), _xk_re.compile(r"^rmdir$"),
+                   _xk_re.compile(r"^shred$"), _xk_re.compile(r"^unlink$")]
+_XK_DESTRUCTIVE_COMPOUND = [
+    ("find", lambda rest: "-delete" in rest),
+    ("git", lambda rest: rest[:1] == ["clean"] and any(a.startswith("-") and "f" in a for a in rest)),
+    ("git", lambda rest: (rest[:2] == ["reset", "--hard"]) or ("reset" in rest[:1] and "--hard" in rest)),
+    ("git", lambda rest: rest[:1] == ["checkout"] and ("--" in rest or any(a in (".", "-f", "--force") for a in rest))),
+]
+
+
+def _xk_resolve(path, cwd):
+    if not path or path.startswith("-"):
+        return None if path is None else "-flag-"
+    if _xk_re.search(r"[$`\\]", path):
+        return None
+    p = os.path.expanduser(path)
+    p = os.path.normpath(p if os.path.isabs(p) else os.path.join(cwd or "/", p))
+    return p
+
+
+def _xk_under_scratch(p):
+    return any(p == r.rstrip("/") or p.startswith(r) for r in _XK_SCRATCH)
+
+
+def classify_destructive_fs(command_text, cwd=None):
+    seg_cwd = cwd
+    for seg in _xk_re.split(r"(?:\|\||&&|;|\|)", command_text or ""):
+        seg = seg.strip()
+        if not seg:
+            continue
+        try:
+            argv = _xk_shlex.split(seg)
+        except ValueError:
+            if _xk_re.search(r"\b(rm|rmdir|shred|unlink)\b", seg):
+                return "attest"
+            continue
+        if not argv:
+            continue
+        if argv[0] == "cd" and len(argv) > 1:
+            nxt = _xk_resolve(argv[1], seg_cwd)
+            seg_cwd = nxt or seg_cwd
+            continue
+        head, rest = argv[0], argv[1:]
+        hit = any(rx.match(head) for rx in _XK_DESTRUCTIVE) or \
+            any(head == h and pred(rest) for h, pred in _XK_DESTRUCTIVE_COMPOUND)
+        if not hit:
+            continue
+        targets = [a for a in rest if not a.startswith("-")]
+        if not targets:
+            return "attest"
+        for t in targets:
+            rp = _xk_resolve(t, seg_cwd)
+            if rp == "-flag-":
+                continue
+            if rp is None or not _xk_under_scratch(rp):
+                return "attest"
+    return None
+
+
+def _xk_escalate(mapped, args, data):
+    try:
+        if mapped == "terminal" and classify_destructive_fs(
+                (args or {}).get("command") or "", (data or {}).get("cwd")) == "attest":
+            return "destructive filesystem command outside scratch roots"
+    except Exception:
+        pass
+    return None
+# ===== end xChk engine-block =====
+
 def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
     tool_name = data.get("tool_name") or ""
     tool_input = data.get("tool_input") or {}
@@ -985,7 +1112,7 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
     label_note = f" [{', '.join(l['label'] for l in labels)}]" if labels else ""
 
     summary = summarize(tool_name, tool_input)
-    auth = client.authorize(mapped, args, prompt=f"{HARNESS_LABEL} {tool_name}", danger_desc=summary,
+    auth = client.authorize(mapped, args, telemetry=model_telemetry(data), escalate=_xk_escalate(mapped, args, data), prompt=f"{HARNESS_LABEL} {tool_name}", danger_desc=summary,
                             run_ticket=ticket, action_area=area_hint,
                             delegation_chain=chain, labels=labels)
 
@@ -1000,7 +1127,7 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
         # including the delegation edge, which names the NEW run as parent.
         run_ref = (run or {}).get("runRef") or run_ref
         chain = parent_chain(run) if mapped == "spawn_agent" else None
-        auth = client.authorize(mapped, args, prompt=f"{HARNESS_LABEL} {tool_name}", danger_desc=summary,
+        auth = client.authorize(mapped, args, telemetry=model_telemetry(data), escalate=_xk_escalate(mapped, args, data), prompt=f"{HARNESS_LABEL} {tool_name}", danger_desc=summary,
                                 run_ticket=ticket, action_area=area_hint,
                                 delegation_chain=chain, labels=labels)
 

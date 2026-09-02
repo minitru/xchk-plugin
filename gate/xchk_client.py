@@ -102,6 +102,8 @@ class XchkClient:
         action_area: Optional[str] = None,
         delegation_chain: Optional[list] = None,
         labels: Optional[list] = None,
+        telemetry: Optional[dict] = None,
+        escalate: Optional[str] = None,
     ) -> Dict[str, Any]:
         """POST /api/agents/authorize. Returns disposition or skip for legacy keys."""
         if not self.configured:
@@ -131,6 +133,10 @@ class XchkClient:
         # precision-first inline tier is entitled to make.
         if labels:
             body["labels"] = labels
+        if telemetry:
+            body.update(telemetry)
+        if escalate:
+            body["escalate"] = escalate
         if tool_name == "terminal":
             body["command"] = normalize_terminal_command(args.get("command") or "")
         elif tool_name in ("write_file", "patch", "read_file"):
