@@ -29,6 +29,7 @@ Security posture:
 
 from __future__ import annotations
 
+import base64
 import calendar
 import json
 import os
@@ -212,7 +213,10 @@ SHELL_INIT_NAMES = (
 )
 # Distinctive enough to deny by basename wherever they live: the repo
 # checkout, the installed copy, or a staged copy about to be swapped in.
-GATE_FILE_NAMES = ("xchk_hook.py", "xchk_client.py")
+# ".xchk" is the PROJECT MARKER: it names the plate a tree runs as (local
+# identity broker). Letting the agent write it would let the agent choose
+# its own identity, so it is denied by basename wherever it is written.
+GATE_FILE_NAMES = ("xchk_hook.py", "xchk_client.py", ".xchk")
 # Env vars that would disarm or redirect the gate in a future session.
 GATE_ENV_NAMES = ("XCHK_FAIL_CLOSED", "XCHK_CONFIG", "XCHK_STATE_DIR",
                   "XCHK_BASE", "XCHK_ALLOW_INSECURE")
@@ -263,10 +267,14 @@ def screened_roots() -> list:
 
 
 def _resolve(path) -> Path:
-    """expanduser + realpath: symlinks and ../ hops land on the real target,
-    and realpath tolerates a nonexistent tail (a Write creating the file)."""
+    """expandvars + expanduser + realpath: env-var spellings ($HOME,
+    ${HOME}), ~, symlinks and ../ hops all land on the real target, and
+    realpath tolerates a nonexistent tail (a Write creating the file).
+    expandvars runs FIRST so an env-var spelling of a protected path
+    resolves to the same target the shell would reach — F1: keep the
+    file-path check at least as broad as the bash screen."""
     try:
-        return Path(os.path.realpath(Path(str(path)).expanduser()))
+        return Path(os.path.realpath(Path(os.path.expandvars(str(path))).expanduser()))
     except (OSError, ValueError):
         return Path(str(path))
 
@@ -275,6 +283,12 @@ def is_protected_path(target: str) -> bool:
     if not target:
         return False
     t = _resolve(target)
+    # Fail-safe: a candidate that STILL contains "$" after expansion names
+    # an env var unset in the gate's own process. We cannot know where it
+    # points, so we must not clear it — treat an unexpanded $VAR/${VAR} in a
+    # protected-path candidate as protected (F1).
+    if "$" in str(t):
+        return True
     if t.name in GATE_FILE_NAMES:
         return True
     return any(t == r or r in t.parents for r in map(_resolve, protected_roots()))
@@ -304,6 +318,36 @@ def bash_screen():
     return re.compile(_BOUNDARY + "(?:" + alts + ")")
 
 
+def _deobfuscate(command: str) -> str:
+    """Best-effort static expansion of common encodings in a shell command, so
+    the spelling screen also sees a protected path an agent tried to HIDE from
+    it (e.g. `echo <base64> | base64 -d`). Closes the demonstrated F2 evasion
+    without over-denying: it only ADDS matchable text, and only a decode that
+    reconstructs a protected spelling changes any outcome. NOT complete — a
+    name assembled at runtime (`${V}_CLOSED`), read from a file, or produced by
+    a wrapper binary stays opaque to static analysis; that residual is F2's
+    stated limit, addressed by recording the attempt, not a bigger regex.
+    See bypass-detection-benchmark-results.md, finding F2."""
+    if not command:
+        return ""
+    shadow = []
+    for blob in re.findall(r"[A-Za-z0-9+/]{12,}={0,2}", command):
+        try:
+            dec = base64.b64decode(blob, validate=True).decode("utf-8")
+        except Exception:
+            continue
+        if dec.isprintable():
+            shadow.append(dec)
+    for hexrun in re.findall(r"(?:\\x[0-9a-fA-F]{2}){4,}", command):
+        try:
+            dec = bytes.fromhex(hexrun.replace("\\x", "")).decode("utf-8")
+        except Exception:
+            continue
+        if dec.isprintable():
+            shadow.append(dec)
+    return " ".join(shadow)
+
+
 # Wire name -> display name. The wire name keys the install slot, so a harness
 # missing here would silently share Claude's slot; resolve_harness() defaults
 # conservatively and the label is cosmetic.
@@ -331,10 +375,77 @@ def resolve_harness(data: dict) -> str:
     return "claude"
 
 
+def _broker_resolve(harness: str) -> None:
+    """LOCAL identity broker (identity-resolution architecture, increment 3).
+
+    If this session was not handed an explicit credential, walk up from cwd
+    to the nearest `.xchk` PROJECT MARKER (a plain FILE naming a plate; a
+    `.xchk` directory is ignored — only the file form is basename-protected
+    from agent writes) and load that plate's envelope from the resident
+    manager's store. The envelope supplies key / state dir / base /
+    approver / per-plate config, injected through the SAME env vars the
+    explicit path uses — so downstream path computation, the session
+    credential-scope rule, and protected-roots are unchanged. Two sessions
+    in two trees resolve to two plates: coexistence with no host-global
+    credential, and the approver rides in with the envelope.
+
+    Precedence: an explicit XCHK_API_KEY wins (deliberate override).
+    Trust: the marker only NAMES a plate — authority comes from the
+    envelope the operator's manager stored (mode 600, under a protected
+    root). No marker, no envelope, or any error -> unchanged behavior;
+    brokering must never break the gate.
+    """
+    if os.environ.get("XCHK_API_KEY"):
+        return
+    try:
+        here = Path.cwd()
+        marker = None
+        for d in (here, *here.parents):
+            cand = d / ".xchk"
+            if cand.is_file():
+                marker = cand
+                break
+        if marker is None:
+            return
+        raw = marker.read_text().strip()
+        try:
+            plate = str(json.loads(raw).get("plate") or "").strip().upper()
+        except ValueError:
+            plate = raw.split()[0].strip().upper() if raw else ""
+        if not plate or not re.fullmatch(r"[A-Z0-9-]{3,16}", plate):
+            return
+        mgr = Path(os.environ.get("XCHK_MANAGER_DIR", "~/.xchk/manager")).expanduser()
+        env_path = mgr / "envelopes" / f"{plate}.json"
+        if not env_path.is_file():
+            return
+        mode = env_path.stat().st_mode & 0o777
+        if mode & 0o077:
+            env_path.chmod(0o600)
+        envd = json.loads(env_path.read_text()) or {}
+        key = envd.get("api_key")
+        if not key:
+            return
+        os.environ["XCHK_API_KEY"] = str(key)
+        if not os.environ.get("XCHK_STATE_DIR"):
+            state = envd.get("state_dir") or str(
+                Path("~/.xchk").expanduser() / f"{(harness or 'claude')}-runs-{plate}")
+            os.environ["XCHK_STATE_DIR"] = state
+        for env_name, field in (("XCHK_BASE", "base"),
+                                ("XCHK_APPROVER", "approver"),
+                                ("XCHK_CONFIG", "config")):
+            if envd.get(field) and not os.environ.get(env_name):
+                os.environ[env_name] = str(envd[field])
+    except (OSError, ValueError):
+        return
+
+
 def apply_harness(harness: str) -> None:
     """Bind this process to one harness: label, config, run state. Separate
     state dirs matter — run tickets are per-install, and one dir would let a
     Cursor session load a Claude session's ticket on a session_id collision."""
+    # Resolve brokered identity FIRST, so STATE_DIR/CONFIG_PATH below are
+    # computed from the envelope's env exactly as from an explicit launch.
+    _broker_resolve(harness)
     global HARNESS, HARNESS_LABEL, STATE_DIR, CONFIG_PATH
     HARNESS = harness or "claude"
     HARNESS_LABEL = HARNESS_LABELS.get(HARNESS, HARNESS.title())
@@ -362,6 +473,16 @@ def load_config() -> dict:
         "approver": os.environ.get("XCHK_APPROVER"),
         "fail_closed": os.environ.get("XCHK_FAIL_CLOSED"),
         "attest_timeout": os.environ.get("XCHK_ATTEST_TIMEOUT"),
+        # Session-scoped iff this session was handed BOTH its own
+        # credential and its own chain state. Sharing the harness-wide
+        # state directory means sharing a chain, which is not a separate
+        # install no matter whose key it holds.
+        "credential_scope": (
+            "session"
+            if os.environ.get("XCHK_API_KEY") and os.environ.get("XCHK_STATE_DIR")
+            else "host"
+        ),
+
     }
     file_fail_closed = cfg.get("fail_closed")
     for k, v in env.items():
@@ -677,6 +798,13 @@ def write_run_file(run: dict | None, cfg: dict) -> None:
             "runRef": ref,
             "plate": (run or {}).get("plate"),
             "profile": cfg.get("profile") or "default",
+            # Which credential this install holds: "session" when the
+            # operator handed it its own key AND its own chain state,
+            # "host" when it is the harness-wide shared registration.
+            # The registry lets differently-profiled SESSION installs
+            # coexist; anything reporting "host" keeps displacing, so a
+            # half-configured launch fails toward the old behaviour.
+            "credentialScope": cfg.get("credential_scope") or "host",
             "harness": HARNESS,
             "pid": pid,
             "tty": os.ttyname(0) if os.isatty(0) else None,
@@ -800,8 +928,11 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
     # refuses to let the agent rewrite the gate. See "Gate self-protection".
     if mapped in ("write_file", "patch") and is_protected_path(target):
         decide("deny", f"xchk: '{target}' is gate-critical (gate code/config, hook registration, or shell init) — no grant authorizes modifying the gate")
-    if mapped == "terminal" and bash_screen().search(str(tool_input.get("command") or "")):
-        decide("deny", "xchk: command references gate-critical paths or gate env vars (~/.xchk, gate code, hook registration, shell init, XCHK_*) — no grant authorizes this; run it from a shell the agent does not drive")
+    if mapped == "terminal":
+        _cmd = str(tool_input.get("command") or "")
+        _scr = bash_screen()
+        if _scr.search(_cmd) or _scr.search(_deobfuscate(_cmd)):
+            decide("deny", "xchk: command references gate-critical paths or gate env vars (~/.xchk, gate code, hook registration, shell init, XCHK_*) — no grant authorizes this; run it from a shell the agent does not drive. Encoded spellings (base64, hex) are expanded before screening.")
     if mapped == "read_file" and target:
         t = _resolve(target)
         if any(t == r or r in t.parents
@@ -888,7 +1019,15 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
     # attest — human approval required
     approver = cfg.get("approver")
     if not approver:
-        decide("ask", f"xchk: area {area} requires attestation and no remote approver is configured — asking locally")
+        # A licensed plate reaching attest with no approver is a malformed
+        # install: this action requires a human, and there is no independent
+        # human to ask. The local terminal prompt would be answered by the
+        # agent's own operator — a self-approval with no server-side record,
+        # the exact rubber-stamp this system exists to detect. Fail closed
+        # and name the fix, rather than launder a self-approval as an
+        # attestation. (Unlicensed sessions never reach this branch —
+        # authorize has already succeeded.)
+        decide("deny", f"xchk: area {area} requires attestation but this licence has no approver configured — denying rather than self-approving. Fix: set an approver on the licence so approvals route to an independent human.")
 
     att_id, err = client.create_attestation(
         prompt=f"{run_ref} (via {HARNESS_LABEL}) wants to {summary or tool_name}{label_note}",
@@ -903,7 +1042,12 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
     if not att_id:
         if cfg["fail_closed"]:
             decide("deny", f"xchk: could not create attestation ({err}) — failing closed")
-        decide("ask", f"xchk: could not reach approver ({err}) — asking locally")
+        # The licence HAS an approver; the attestation just could not be
+        # created. A transient failure must not downgrade "a human must
+        # approve" into "the operator approves themselves" — fail closed
+        # and retry when the registry is reachable (authorize succeeded
+        # moments ago, so this is rare and short-lived).
+        decide("deny", f"xchk: could not create the attestation ({err}) — denying rather than self-approving; retry shortly")
 
     result = client.poll_attestation(att_id, timeout_seconds=cfg["attest_timeout"])
     if result.get("status") == "completed" and result.get("response") in (True, "true", "yes", 1, "approved"):
