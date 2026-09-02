@@ -85,7 +85,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None):
         except Exception:
             pass
 
-PLUGIN_VERSION = "0.1.7"
+PLUGIN_VERSION = "0.1.8"
 MAX_STDIN_BYTES = 512 * 1024
 
 

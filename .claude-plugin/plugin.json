@@ -1,7 +1,7 @@
 {
   "name": "xchk",
-  "version": "0.1.7",
-  "description": "xChk accountability layer — enforcement head (Claude Code plugin). PreToolUse gate: every tool call is authorized against the agent's license, recorded to the local dashcam chain with content binding, and human-approval ceremonies raised where the grant demands them. Enforcement-grade: enabling this plugin IS the gate.",
+  "version": "0.1.8",
+  "description": "xChk accountability layer \u2014 enforcement head (Claude Code plugin). PreToolUse gate: every tool call is authorized against the agent's license, recorded to the local dashcam chain with content binding, and human-approval ceremonies raised where the grant demands them. Enforcement-grade: enabling this plugin IS the gate.",
   "author": {
     "name": "Sean Mac Guire",
     "url": "https://in.xchk.io"
