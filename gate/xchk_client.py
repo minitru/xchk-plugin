@@ -178,6 +178,10 @@ class XchkClient:
                 "disposition": "forbid",
                 "area": (data or {}).get("area"),
                 "reason": (data or {}).get("reason") or (data or {}).get("error") or "forbidden",
+                # code=lockdown rides with the registry-SIGNED statement, so the
+                # host can verify the halt itself and remember its epoch.
+                "code": (data or {}).get("code"),
+                "lockdownStatement": (data or {}).get("lockdownStatement"),
                 **ref,
             }
         if status == 202 or disposition == "attest":
@@ -456,6 +460,29 @@ class XchkClient:
         return status == 200
 
 
+    def get_lockdown_statements(self) -> Optional[dict]:
+        """GET /api/agents/lockdown/statements — the registry-signed kill and
+        clear statements for this plate's scopes. Public claims; the signature
+        is what the host trusts, never this JSON."""
+        if not self.configured:
+            return None
+        status, data = self.request("GET", "/api/agents/lockdown/statements", timeout=10)
+        if status == 200 and isinstance(data, dict):
+            return data
+        return None
+
+    def get_registry_keys(self) -> Optional[list]:
+        """GET /.well-known/xchk-registry — the registry's published signing
+        keys (JWK). Unauthenticated by design: anyone may verify."""
+        req = urllib.request.Request(f"{self.base_url}/.well-known/xchk-registry", method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=10, context=self._ssl) as resp:
+                doc = json.loads(resp.read().decode("utf-8") or "{}")
+            keys = doc.get("keys")
+            return keys if isinstance(keys, list) else None
+        except Exception:
+            return None
+
     def submit_local_segment(self, segment: dict) -> Optional[dict]:
         """POST /api/agents/local-segment — host half of the MACG-004 triangle.
 
@@ -470,6 +497,81 @@ class XchkClient:
         if status in (200, 400) and isinstance(data, dict):
             return data
         return None
+
+
+# ---------------------------------------------------------------------------
+# Registry-signed statement verification — stdlib only.
+#
+# The Emergency Stop (MACG-004 kill switch) is a registry-signed statement
+# {kind:'xchk.lockdown.v1', action:'kill'|'clear', scope, target, epoch, …}
+# as an RS256 JWT. The host verifies it against the registry's published
+# JWK (RSASSA-PKCS1-v1_5 / SHA-256, RFC 8017 §8.2.2) so that a tampered
+# database or a spoofed "not locked down" reply cannot forge a resume.
+# Pure-Python RSA is acceptable for VERIFICATION: no secret material, so
+# timing side channels do not apply; correctness is what matters.
+# ---------------------------------------------------------------------------
+import hashlib as _vhashlib
+import hmac as _vhmac
+import base64 as _vbase64
+
+_SHA256_DIGESTINFO = bytes.fromhex("3031300d060960864801650304020105000420")
+
+
+def _b64u_decode(s: str) -> bytes:
+    s = str(s or "")
+    s += "=" * (-len(s) % 4)
+    return _vbase64.urlsafe_b64decode(s.encode("ascii"))
+
+
+def _rsa_pkcs1v15_sha256_verify(n: int, e: int, sig: bytes, msg: bytes) -> bool:
+    k = (n.bit_length() + 7) // 8
+    if len(sig) != k:
+        return False
+    m = pow(int.from_bytes(sig, "big"), e, n)
+    em = m.to_bytes(k, "big")
+    t = _SHA256_DIGESTINFO + _vhashlib.sha256(msg).digest()
+    if k < len(t) + 11:
+        return False
+    expected = b"\x00\x01" + b"\xff" * (k - len(t) - 3) + b"\x00" + t
+    return _vhmac.compare_digest(em, expected)
+
+
+def verify_registry_jwt(token: str, keys: list, audience: str,
+                        kind: Optional[str] = None, now: Optional[float] = None) -> dict:
+    """Verify an RS256 JWT against a JWK list; return its payload or raise
+    ValueError. Checks: structure, alg, kid→key, signature, aud, exp, kind."""
+    parts = str(token or "").split(".")
+    if len(parts) != 3:
+        raise ValueError("malformed token")
+    h_raw, p_raw, s_raw = parts
+    header = json.loads(_b64u_decode(h_raw).decode("utf-8"))
+    if header.get("alg") != "RS256":
+        raise ValueError(f"alg {header.get('alg')!r} not RS256")
+    kid = header.get("kid")
+    cands = [k for k in (keys or []) if k.get("kty") == "RSA" and (kid is None or k.get("kid") == kid)]
+    if not cands:
+        raise ValueError("no matching registry key")
+    msg = f"{h_raw}.{p_raw}".encode("ascii")
+    sig = _b64u_decode(s_raw)
+    ok = False
+    for k in cands:
+        n = int.from_bytes(_b64u_decode(k["n"]), "big")
+        e = int.from_bytes(_b64u_decode(k["e"]), "big")
+        if _rsa_pkcs1v15_sha256_verify(n, e, sig, msg):
+            ok = True
+            break
+    if not ok:
+        raise ValueError("signature does not verify")
+    payload = json.loads(_b64u_decode(p_raw).decode("utf-8"))
+    aud = payload.get("aud")
+    if audience not in (aud if isinstance(aud, list) else [aud]):
+        raise ValueError(f"audience {aud!r}")
+    exp = payload.get("exp")
+    if isinstance(exp, (int, float)) and exp < (now if now is not None else time.time()):
+        raise ValueError("statement expired")
+    if kind is not None and payload.get("kind") != kind:
+        raise ValueError(f"kind {payload.get('kind')!r}")
+    return payload
 
 
 # ---------------------------------------------------------------------------

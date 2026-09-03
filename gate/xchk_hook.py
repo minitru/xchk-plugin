@@ -85,7 +85,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None):
         except Exception:
             pass
 
-PLUGIN_VERSION = "0.1.8"
+PLUGIN_VERSION = "0.1.9"
 MAX_STDIN_BYTES = 512 * 1024
 
 
@@ -1037,6 +1037,158 @@ def _xk_escalate(mapped, args, data):
     return None
 # ===== end xChk engine-block =====
 
+# ---------------------------------------------------------------------------
+# EMERGENCY STOP, VERIFIED ON THE HOST.
+#
+# The registry's 403 code=lockdown carries a statement it SIGNED. The host
+# verifies it against the registry's published key and remembers the epoch in
+# STATE_DIR/lockdown.json. From then on a plain "allow" is not enough to
+# resume: the host asks for the signed CLEAR of a strictly higher epoch and
+# verifies that too. A tampered database, a spoofed reply, or a registry that
+# simply forgot cannot resume a halted agent. Absence never resumes.
+# Every step degrades to DENY — the safe direction for a kill switch.
+# ---------------------------------------------------------------------------
+LOCKDOWN_AUD = "xchk-lockdown"
+LOCKDOWN_KIND = "xchk.lockdown.v1"
+_KEYS_TTL_SEC = 6 * 3600
+
+
+def _lockdown_ledger_path() -> Path:
+    return STATE_DIR / "lockdown.json"
+
+
+def _lockdown_ledger_read() -> dict:
+    try:
+        return json.loads(_lockdown_ledger_path().read_text()) or {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _lockdown_ledger_write(ledger: dict) -> None:
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        p = _lockdown_ledger_path()
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(ledger, sort_keys=True))
+        tmp.replace(p)
+        p.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _registry_keys(client: XchkClient, refresh: bool = False) -> list:
+    """Published registry JWKs, cached in STATE_DIR (never in the agent's
+    reach). refresh=True bypasses the cache — used once after a signature
+    failure, in case the registry rotated its key."""
+    cache = STATE_DIR / "registry-keys.json"
+    if not refresh:
+        try:
+            doc = json.loads(cache.read_text())
+            if time.time() - float(doc.get("fetchedAt") or 0) < _KEYS_TTL_SEC and doc.get("keys"):
+                return doc["keys"]
+        except (OSError, ValueError):
+            pass
+    keys = client.get_registry_keys() or []
+    if keys:
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = cache.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps({"fetchedAt": time.time(), "keys": keys}))
+            tmp.replace(cache)
+            cache.chmod(0o600)
+        except OSError:
+            pass
+    return keys
+
+
+def _verify_statement(client: XchkClient, token: str) -> dict:
+    """Verify with cached keys; on a signature failure refetch once."""
+    from xchk_client import verify_registry_jwt
+    try:
+        return verify_registry_jwt(token, _registry_keys(client), LOCKDOWN_AUD, kind=LOCKDOWN_KIND)
+    except ValueError:
+        return verify_registry_jwt(token, _registry_keys(client, refresh=True), LOCKDOWN_AUD, kind=LOCKDOWN_KIND)
+
+
+def _lockdown_guard(auth: dict, cfg: dict, client: XchkClient) -> dict:
+    """Runs on every authorize result. Records verified kills; refuses to
+    honour an allow/attest while a recorded kill has no verified clear."""
+    ledger = _lockdown_ledger_read()
+
+    # 1. A halt: verify the signed statement and remember its epoch.
+    if auth.get("disposition") == "forbid" and auth.get("code") == "lockdown":
+        stmt = auth.get("lockdownStatement")
+        note = "statement absent — halt recorded from the registry's word alone"
+        if stmt:
+            try:
+                p = _verify_statement(client, stmt)
+                if p.get("action") == "kill" and p.get("scope") and p.get("target"):
+                    key = f"{p['scope']}:{p['target']}"
+                    prior = ledger.get(key) or {}
+                    if int(p.get("epoch") or 0) >= int(prior.get("epoch") or 0):
+                        ledger[key] = {"epoch": int(p.get("epoch") or 0), "clearedEpoch": None,
+                                       "reason": p.get("reason"), "at": p.get("at"), "verified": True}
+                        _lockdown_ledger_write(ledger)
+                    note = f"registry-signed statement verified (scope {p['scope']}, epoch {p.get('epoch')})"
+                else:
+                    note = "statement verified but is not a kill — halt stands"
+            except Exception as e:  # deny either way; say which
+                note = f"statement did NOT verify ({e}) — halt stands"
+        decide("deny", f"xchk: EMERGENCY STOP in effect — {auth.get('reason') or 'agent halted'}; {note}")
+
+    # 2. Not a halt. Is there a recorded kill with no verified clear?
+    outstanding = {k: v for k, v in ledger.items()
+                   if v.get("clearedEpoch") is None or int(v["clearedEpoch"]) <= int(v.get("epoch") or 0)}
+    if not outstanding:
+        return auth
+
+    problems = []
+    try:
+        doc = client.get_lockdown_statements()
+        if not isinstance(doc, dict):
+            raise ValueError("registry did not return statements")
+        # A newer verified kill on any scope re-arms the ledger.
+        for a in doc.get("active") or []:
+            try:
+                p = _verify_statement(client, a.get("statementJwt") or "")
+                if p.get("action") == "kill":
+                    key = f"{p.get('scope')}:{p.get('target')}"
+                    ledger[key] = {"epoch": int(p.get("epoch") or 0), "clearedEpoch": None,
+                                   "reason": p.get("reason"), "at": p.get("at"), "verified": True}
+                    outstanding[key] = ledger[key]
+            except Exception as e:
+                problems.append(f"active statement unverifiable ({e})")
+        # A verified clear of strictly higher epoch releases exactly its scope.
+        for c in doc.get("cleared") or []:
+            key = f"{c.get('scope')}:{c.get('target')}"
+            if key not in outstanding:
+                continue
+            try:
+                p = _verify_statement(client, c.get("clearStatementJwt") or "")
+                held = int(outstanding[key].get("epoch") or 0)
+                if (p.get("action") == "clear" and f"{p.get('scope')}:{p.get('target')}" == key
+                        and int(p.get("epoch") or 0) > held and int(p.get("clears") or -1) >= held):
+                    ledger[key]["clearedEpoch"] = int(p.get("epoch"))
+                    ledger[key]["clearedBy"] = p.get("approvers")
+                    del outstanding[key]
+                else:
+                    problems.append(f"clear for {key} does not release epoch {held}")
+            except Exception as e:
+                problems.append(f"clear for {key} unverifiable ({e})")
+    except Exception as e:
+        problems.append(str(e))
+    _lockdown_ledger_write(ledger)
+
+    if outstanding:
+        held = ", ".join(f"{k} epoch {v.get('epoch')}" for k, v in outstanding.items())
+        why = ("; ".join(problems) or "no registry-signed clear on file")
+        if cfg.get("fail_closed", True):
+            decide("deny", f"xchk: EMERGENCY STOP was set ({held}) and no registry-signed clear verifies — {why}; refusing to resume on an unsigned word")
+        # fail-open dev box: say so and carry on
+        sys.stderr.write(f"xchk: lockdown clear unverified ({why}); XCHK_FAIL_CLOSED=0 so continuing\n")
+    return auth
+
+
 def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
     tool_name = data.get("tool_name") or ""
     tool_input = data.get("tool_input") or {}
@@ -1135,6 +1287,10 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
         if cfg["fail_closed"]:
             decide("deny", f"xchk: license server unavailable ({auth.get('reason')}) — failing closed")
         sys.exit(0)
+
+    # Emergency Stop, verified on the host: records a signed kill, and
+    # refuses to honour an allow/attest until a signed clear verifies.
+    auth = _lockdown_guard(auth, cfg, client)
 
     area = auth.get("area") or "?"
     if auth.get("disposition") == "allow":
