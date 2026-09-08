@@ -1,6 +1,6 @@
 {
   "name": "xchk",
-  "version": "0.1.8",
+  "version": "0.1.10",
   "description": "xChk accountability layer \u2014 bootstrap head (Hermes Portable Agent Plugins v1). Carries the adoption skill and a read-only status MCP server. This package is bootstrap-grade: it cannot intercept tool execution. Enforcement on Hermes requires the native gate (hermes-xchk.sh setup), which the skill walks you through.",
   "author": "Sean Mac Guire",
   "homepage": "https://in.xchk.io",

@@ -284,6 +284,12 @@ class XchkClient:
         grant = data.get("elevationGrant")
         if grant:
             result["elevation_grant"] = grant
+        # APPROVE WITH CHANGES: the approver's amended command, sealed by the
+        # registry. The gate runs THIS, not the original (gap AM, 6 Sep 2026).
+        amend = data.get("amendment")
+        if isinstance(amend, dict) and amend.get("command"):
+            result["amendment"] = {"command": str(amend["command"]), "byEmail": amend.get("byEmail"),
+                                   "area": amend.get("area"), "originalParamsHash": amend.get("originalParamsHash")}
         return result
 
     def build_action_verify_body(self, tool_name: str, args: dict) -> Dict[str, Any]:

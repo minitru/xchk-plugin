@@ -85,7 +85,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None):
         except Exception:
             pass
 
-PLUGIN_VERSION = "0.1.9"
+PLUGIN_VERSION = "0.1.10"
 MAX_STDIN_BYTES = 512 * 1024
 
 
@@ -731,9 +731,32 @@ def emit(event: str, extra: dict) -> None:
     print(json.dumps({"hookSpecificOutput": {"hookEventName": event, **extra}}))
 
 
-def decide(decision: str, reason: str) -> None:
-    emit("PreToolUse", {"permissionDecision": decision, "permissionDecisionReason": reason[:500]})
+def decide(decision: str, reason: str, updated_input: dict | None = None) -> None:
+    out = {"permissionDecision": decision, "permissionDecisionReason": reason[:500]}
+    if updated_input is not None:
+        # APPROVE WITH CHANGES: what runs is the amended input, not the
+        # original — Claude Code honours hookSpecificOutput.updatedInput.
+        out["updatedInput"] = updated_input
+    emit("PreToolUse", out)
     sys.exit(0)
+
+
+def apply_amendment(mapped: str, tool_input: dict, amendment: dict | None) -> tuple[dict | None, str | None]:
+    """The host's half of gap AM (6 Sep 2026). Returns (updated_input, error).
+    Only a terminal command can be amended; the amended text goes through the
+    same gate-critical screen as any command; Cursor has no updatedInput, so
+    an amendment there is refused rather than silently running the original."""
+    cmd = (amendment or {}).get("command") if isinstance(amendment, dict) else None
+    if not cmd:
+        return None, None
+    if mapped != "terminal":
+        return None, "amendment applies to shell commands only"
+    if HARNESS == "cursor":
+        return None, "this harness cannot run an amended command — approve unchanged, or decline"
+    _scr = bash_screen()
+    if _scr.search(cmd) or _scr.search(_deobfuscate(cmd)):
+        return None, "the amended command references gate-critical paths or gate env vars"
+    return {**tool_input, "command": str(cmd)}, None
 
 
 RUNS_DIR = Path("~/.xchk/runs").expanduser()
@@ -772,7 +795,7 @@ def stamp_terminal_title(run: dict | None) -> None:
 
 
 def write_run_file(run: dict | None, cfg: dict) -> None:
-    """Declare this session's plate binding on disk, for the fleet manager.
+    """Declare this session's plate binding on disk, for the supervisor.
 
     Replaces inference. xchk_manager.scan_running() reconstructs which plate a
     process belongs to by string-matching `ps -axo command` for '-p <profile>
@@ -1334,6 +1357,16 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
 
     result = client.poll_attestation(att_id, timeout_seconds=cfg["attest_timeout"])
     if result.get("status") == "completed" and result.get("response") in (True, "true", "yes", 1, "approved"):
+        amend = result.get("amendment")
+        if amend:
+            updated, aerr = apply_amendment(mapped, tool_input, amend)
+            if aerr:
+                decide("deny", f"xchk: approved WITH CHANGES by {approver} but the amendment cannot run here ({aerr}) — not executing the original either (attestation {att_id})")
+            import hashlib as _ah
+            amended_cmd = updated.get("command", "")
+            _record(auth.get("authRef"), mapped, f"amended by {amend.get('byEmail') or approver}: {amended_cmd[:300]}", client,
+                    _ah.sha256(amended_cmd.encode("utf-8")).hexdigest())
+            decide("allow", f"xchk: approved WITH CHANGES by {amend.get('byEmail') or approver} — running the amended command (attestation {att_id}, area {amend.get('area') or area}, {run_ref})", updated)
         _record(auth.get("authRef"), mapped, summary or tool_name, client, auth.get("paramsHash"))
         decide("allow", f"xchk: approved by {approver} (attestation {att_id}, area {area}, {run_ref})")
     if result.get("status") == "declined":
