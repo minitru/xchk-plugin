@@ -85,7 +85,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None):
         except Exception:
             pass
 
-PLUGIN_VERSION = "0.1.10"
+PLUGIN_VERSION = "0.1.11"
 MAX_STDIN_BYTES = 512 * 1024
 
 
@@ -762,6 +762,42 @@ def apply_amendment(mapped: str, tool_input: dict, amendment: dict | None) -> tu
 RUNS_DIR = Path("~/.xchk/runs").expanduser()
 
 
+# DYNAMIC COST ALLOCATION (12 Sep 2026, Sean: "/cost dev, /cost research … used programmatically").
+# `xchk cost <code> [workspace]` typed in a session charges everything the session does FROM NOW:
+# the code rides every authorize as `tags` (sealed on the record), the run is retagged at the
+# registry, and the supervisor's seat meter reads the same file to charge the seat's messages.
+COST_FILE = Path("~/.xchk/cost.json").expanduser()
+_COST_RE = re.compile(r"^\s*xchk\s+cost(?:\s+([A-Za-z0-9][A-Za-z0-9._-]{0,39}))?(?:\s+([a-z0-9][a-z0-9._-]{0,63}))?\s*$")
+
+
+def _cost_read() -> dict:
+    try:
+        d = json.loads(COST_FILE.read_text()) if COST_FILE.is_file() else {}
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _cost_current(session_id: str) -> dict | None:
+    sw = (_cost_read().get(session_id) or [])
+    return sw[-1] if sw else None
+
+
+def _cost_set(session_id: str, code: str, workspace: str | None) -> None:
+    from datetime import datetime, timezone
+    d = _cost_read()
+    d.setdefault(session_id, []).append({"code": code, "workspace": workspace,
+                                         "since": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")})
+    try:
+        COST_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = COST_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(d))
+        tmp.replace(COST_FILE)
+        COST_FILE.chmod(0o600)
+    except OSError:
+        pass
+
+
 def stamp_terminal_title(run: dict | None) -> None:
     """Put the run ref in the terminal title.
 
@@ -1254,6 +1290,27 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
     ticket = (run or {}).get("ticket")
     run_ref = (run or {}).get("runRef") or "unlicensed"
 
+    # `xchk cost …`: a switch, not an action. Record it, retag the run, and run a harmless echo so
+    # the model sees a clean confirmation instead of a refusal.
+    if mapped == "terminal":
+        cm = _COST_RE.match(str(tool_input.get("command") or ""))
+        if cm:
+            code, ws = cm.group(1), cm.group(2)
+            if not code:
+                cur = _cost_current(session_id)
+                msg = (f"xchk: this session is charged to {cur['code']}" + (f" · {cur['workspace']}" if cur.get('workspace') else "") + f" since {cur['since']}") if cur else "xchk: this session carries no charge code — the plate's sticker or your default applies"
+                decide("allow", msg, {**tool_input, "command": f"echo {json.dumps(msg)}"})
+            note = ""
+            if run and run.get("runSeq") is not None:
+                st, resp = client.request("POST", f"/api/agents/runs/{run['runSeq']}/tags", body={"chargeCode": code, **({"workspace": ws} if ws else {})})
+                if st != 200:
+                    err = (resp or {}).get("error") or f"http {st}"
+                    decide("deny", f"xchk: not switched — {err}")
+                note = f" ({run_ref} retagged)"
+            _cost_set(session_id, code, ws)
+            msg = f"xchk: charged to {code}{' · ' + ws if ws else ''} from now{note}"
+            decide("allow", msg, {**tool_input, "command": f"echo {json.dumps(msg)}"})
+
     args = {}
     if mapped == "terminal":
         args["command"] = str(tool_input.get("command") or "")
@@ -1289,7 +1346,7 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
     summary = summarize(tool_name, tool_input)
     auth = client.authorize(mapped, args, telemetry=model_telemetry(data), escalate=_xk_escalate(mapped, args, data), prompt=f"{HARNESS_LABEL} {tool_name}", danger_desc=summary,
                             run_ticket=ticket, action_area=area_hint,
-                            delegation_chain=chain, labels=labels)
+                            delegation_chain=chain, labels=labels, tags=_cost_current(session_id))
 
     # Renew, don't refuse: an aged-out ticket on a live plate means only the
     # clock ran out, so re-dispatch for THIS session and carry on. A wrong or
@@ -1304,7 +1361,7 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
         chain = parent_chain(run) if mapped == "spawn_agent" else None
         auth = client.authorize(mapped, args, telemetry=model_telemetry(data), escalate=_xk_escalate(mapped, args, data), prompt=f"{HARNESS_LABEL} {tool_name}", danger_desc=summary,
                                 run_ticket=ticket, action_area=area_hint,
-                                delegation_chain=chain, labels=labels)
+                                delegation_chain=chain, labels=labels, tags=_cost_current(session_id))
 
     if auth.get("skip"):
         if cfg["fail_closed"]:

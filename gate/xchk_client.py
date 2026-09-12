@@ -104,6 +104,7 @@ class XchkClient:
         labels: Optional[list] = None,
         telemetry: Optional[dict] = None,
         escalate: Optional[str] = None,
+        tags: Optional[dict] = None,
     ) -> Dict[str, Any]:
         """POST /api/agents/authorize. Returns disposition or skip for legacy keys."""
         if not self.configured:
@@ -137,6 +138,9 @@ class XchkClient:
             body.update(telemetry)
         if escalate:
             body["escalate"] = escalate
+        # Dynamic cost allocation: the session's charge code at this moment, sealed on the record.
+        if tags and tags.get("code"):
+            body["tags"] = {"chargeCode": tags.get("code"), **({"workspace": tags["workspace"]} if tags.get("workspace") else {})}
         if tool_name == "terminal":
             body["command"] = normalize_terminal_command(args.get("command") or "")
         elif tool_name in ("write_file", "patch", "read_file"):
