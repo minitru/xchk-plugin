@@ -43,6 +43,17 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/gate/xchk_prompt_hook.py\"",
+            "timeout": 20
+          }
+        ]
+      }
     ]
   }
 }
