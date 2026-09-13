@@ -33,7 +33,8 @@ def ensure_launcher() -> None:
 def group() -> dict:
     g = {"enabled": True}
     for ev, timeout in EVENTS.items():
-        g[ev] = [{"type": "command", "command": f'"{LAUNCHER}" --event {ev}', "timeout": timeout}]   # flat = no matcher = every tool
+        e = {"type": "command", "command": f'"{LAUNCHER}" --event {ev}', "timeout": timeout}
+        g[ev] = [{"matcher": ".*", "hooks": [e]}] if ev == "PreToolUse" else [e]   # tool events take the matcher form; ".*" = every tool
     return g
 
 
