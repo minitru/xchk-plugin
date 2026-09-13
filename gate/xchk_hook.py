@@ -85,7 +85,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None):
         except Exception:
             pass
 
-PLUGIN_VERSION = "0.1.13"
+PLUGIN_VERSION = "0.1.14"
 MAX_STDIN_BYTES = 512 * 1024
 
 
@@ -351,7 +351,48 @@ def _deobfuscate(command: str) -> str:
 # Wire name -> display name. The wire name keys the install slot, so a harness
 # missing here would silently share Claude's slot; resolve_harness() defaults
 # conservatively and the label is cosmetic.
-HARNESS_LABELS = {"claude": "Claude Code", "cursor": "Cursor"}
+HARNESS_LABELS = {"claude": "Claude Code", "cursor": "Cursor", "codex": "Codex", "antigravity": "Antigravity"}
+
+# ANTIGRAVITY DIALECT (13 Sep 2026). Google's Antigravity (IDE + agy CLI) runs hooks from
+# ~/.gemini/config/hooks.json with its OWN payload: {toolCall:{name,args}, conversationId,
+# workspacePaths, modelName, stepIdx}, no event name in the JSON (the event is which array the
+# hook was registered under — the installer passes it as `--event <Name>`), and a flat decision
+# on stdout: {"decision": "allow"|"deny"|"ask"|…, "reason"}. Tool names are Windsurf's. These two
+# tables turn that into the Claude-shaped payload the rest of this file already understands.
+ANTIGRAVITY_TOOLS = {
+    "run_command": "Bash", "write_to_file": "Write", "replace_file_content": "Edit",
+    "multi_replace_file_content": "MultiEdit", "view_file": "Read", "invoke_subagent": "Agent",
+    "list_dir": "LS", "find_by_name": "Glob", "grep_search": "Grep", "manage_task": "TodoWrite",
+    "ask_question": "AskUserQuestion", "ask_permission": "AskUserQuestion", "list_permissions": "AskUserQuestion",
+}
+ANTIGRAVITY_EVENTS = {"pretooluse": "PreToolUse", "preinvocation": "SessionStart", "stop": "Stop", "sessionend": "SessionEnd"}
+
+
+def antigravity_normalize(data: dict, event_arg: str) -> dict:
+    """Antigravity payload → Claude-shaped fields. Never raises; unknown tools keep their own name
+    (the catch-all wire gates them), unknown args ride along untouched."""
+    out = dict(data)
+    out["hook_event_name"] = ANTIGRAVITY_EVENTS.get(str(event_arg or "").lower(), "")
+    out["session_id"] = str(data.get("conversationId") or data.get("session_id") or "")
+    tc = data.get("toolCall") if isinstance(data.get("toolCall"), dict) else {}
+    name = str(tc.get("name") or "")
+    args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
+    if name:
+        out["tool_name"] = ANTIGRAVITY_TOOLS.get(name, name)
+        ti = dict(args)
+        if name == "run_command":
+            ti["command"] = str(args.get("CommandLine") or args.get("command") or "")
+            if args.get("Cwd"):
+                ti["cwd"] = args.get("Cwd")
+        else:
+            path = next((v for k, v in args.items() if isinstance(v, str) and (k.endswith("File") or k.endswith("Path"))), None)
+            if path:
+                ti["file_path"] = path
+        out["tool_input"] = ti
+    ws = data.get("workspacePaths")
+    if isinstance(ws, list) and ws and not out.get("cwd"):
+        out["cwd"] = ws[0]
+    return out
 
 # Set once in main() from the payload, before any path is resolved.
 HARNESS = "claude"
@@ -372,6 +413,8 @@ def resolve_harness(data: dict) -> str:
         return env
     if data.get("cursor_version"):
         return "cursor"
+    if isinstance(data.get("toolCall"), dict) or data.get("conversationId"):
+        return "antigravity"
     return "claude"
 
 
@@ -728,6 +771,14 @@ def emit(event: str, extra: dict) -> None:
     if HARNESS == "cursor" and "additionalContext" in extra:
         print(json.dumps({"additional_context": extra["additionalContext"]}))
         return
+    if HARNESS == "antigravity":
+        # Antigravity reads a flat decision; anything else it ignores. Non-decision events answer {}.
+        if "permissionDecision" in extra:
+            print(json.dumps({"decision": "deny" if extra["permissionDecision"] == "deny" else "allow",
+                              "reason": str(extra.get("permissionDecisionReason") or "")[:500]}))
+        else:
+            print("{}")
+        return
     print(json.dumps({"hookSpecificOutput": {"hookEventName": event, **extra}}))
 
 
@@ -751,7 +802,7 @@ def apply_amendment(mapped: str, tool_input: dict, amendment: dict | None) -> tu
         return None, None
     if mapped != "terminal":
         return None, "amendment applies to shell commands only"
-    if HARNESS == "cursor":
+    if HARNESS in ("cursor", "antigravity"):
         return None, "this harness cannot run an amended command — approve unchanged, or decline"
     _scr = bash_screen()
     if _scr.search(cmd) or _scr.search(_deobfuscate(cmd)):
@@ -1478,6 +1529,10 @@ def main() -> None:
         sys.exit(0)
 
     apply_harness(resolve_harness(data))
+    if HARNESS == "antigravity":
+        # the event rides argv (`--event PreToolUse`): Antigravity's JSON does not name it
+        ev_arg = next((sys.argv[i + 1] for i, a in enumerate(sys.argv[:-1]) if a == "--event"), "")
+        data = antigravity_normalize(data, ev_arg)
     cfg = load_config()
     client = make_client(cfg)
     event = _EVENTS.get(str(data.get("hook_event_name") or "").lower(), "")
