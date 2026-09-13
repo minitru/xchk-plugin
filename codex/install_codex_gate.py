@@ -56,10 +56,18 @@ EVENTS = {
 }
 
 
-def hook_entry(timeout: int) -> dict:
+LABELS = {
+    "PreToolUse": "xChk: answers for this action under your licence (allow / refuse / ask a person)",
+    "SessionStart": "xChk: opens the run ticket for this session",
+    "Stop": "xChk: seals what this turn did onto the record",
+    "SessionEnd": "xChk: closes the run ticket",
+}
+
+
+def hook_entry(timeout: int, event: str = "") -> dict:
     # XCHK_HARNESS is what keeps this install in its own (harness, guardedHost) slot, its own
     # credential and its own run-ticket state.
-    return {"type": "command", "command": f'XCHK_HARNESS=codex python3 "{GATE}"', "timeout": timeout}
+    return {"type": "command", "command": f'XCHK_HARNESS=codex python3 "{GATE}"', "timeout": timeout, **({"statusMessage": LABELS[event]} if event in LABELS else {})}
 
 
 def load() -> dict:
@@ -113,7 +121,7 @@ def main() -> int:
 
     if not args.remove:
         for name, timeout in EVENTS.items():
-            doc["hooks"].setdefault(name, []).append({"hooks": [hook_entry(timeout)]})   # no matcher: everything
+            doc["hooks"].setdefault(name, []).append({"hooks": [hook_entry(timeout, name)]})   # no matcher: everything
 
     if args.show:
         print(json.dumps(doc, indent=2))
