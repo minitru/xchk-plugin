@@ -33,7 +33,7 @@ def ensure_launcher() -> None:
 def group() -> dict:
     g = {"enabled": True}
     for ev, timeout in EVENTS.items():
-        g[ev] = [{"hooks": [{"type": "command", "command": f'"{LAUNCHER}" --event {ev}', "timeout": timeout}]}]   # no matcher: everything
+        g[ev] = [{"type": "command", "command": f'"{LAUNCHER}" --event {ev}', "timeout": timeout}]   # flat = no matcher = every tool
     return g
 
 
