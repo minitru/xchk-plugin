@@ -85,7 +85,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None):
         except Exception:
             pass
 
-PLUGIN_VERSION = "0.1.14"
+PLUGIN_VERSION = "0.1.15"
 MAX_STDIN_BYTES = 512 * 1024
 
 
@@ -236,6 +236,12 @@ def protected_roots() -> list:
         home / ".claude" / "settings.local.json",
         home / ".cursor" / "settings.json",        # Cursor-side registration
         home / ".cursor" / "hooks.json",
+        # Codex + Antigravity registration (per-harness bypass bench, 13 Sep 2026): each harness
+        # can be unhooked through its OWN files; they are gate-critical exactly like settings.json.
+        home / ".codex" / "hooks.json",            # Codex hook registration
+        home / ".codex" / "config.toml",           # Codex hooks trust hash + MCP wrapper binding
+        home / ".gemini" / "config" / "hooks.json",      # Antigravity hook registration (re-read live)
+        home / ".gemini" / "config" / "mcp_config.json", # Antigravity MCP wrapper binding
         *(home / n for n in SHELL_INIT_NAMES),     # future-session environment
     ]
 
