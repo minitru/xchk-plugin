@@ -28,7 +28,7 @@ from __future__ import annotations
 import re
 
 DETECTOR = "xchk-inline"
-DETECTOR_VERSION = "1.0.0"
+DETECTOR_VERSION = "1.1.0"
 
 # Cap the scanned text. Tool inputs are normally small; a pathological one
 # must not turn every tool call into a regex benchmark.
@@ -83,6 +83,55 @@ def _label(name, confidence_pct, spans, detail=None):
     }
 
 
+# ── HAS_BANKING (detector 1.1.0, 15 Sep 2026: the "Banking & payments watch" package) ──────────────────
+# Bank-side identifiers and transfer intent. IBAN and ABA carry checksums (near-proof); an account number
+# needs its cue word; a transfer verb needs an amount beside it. Each is scored on its own.
+_IBAN_RE = re.compile(r"(?<![A-Z0-9])([A-Z]{2}[0-9]{2}(?:[ ]?[A-Z0-9]{4}){2,7}(?:[ ]?[A-Z0-9]{1,4})?)(?![A-Z0-9])")
+_ABA_RE = re.compile(r"(?i)(?:routing|aba|rtn|transit)[^0-9]{0,20}(?<![0-9])([0-9]{9})(?![0-9])")
+_ACCT_RE = re.compile(r"(?i)\b(?:account|acct|a/c)\s*(?:number|no\.?|num|#)\s*[:#]?\s*(?<![0-9])([0-9][0-9 -]{5,20}[0-9])(?![0-9])")
+_XFER_RE = re.compile(r"(?i)\b(?:wire|ach|remit(?:tance)?|payout|transfer|disburse|send)\b[^\n]{0,60}?(?:[$€£]\s?[0-9][0-9,]*(?:\.[0-9]{2})?|[0-9][0-9,]*(?:\.[0-9]{2})?\s?(?:usd|eur|gbp|cad|dollars))")
+
+
+def _iban_ok(s: str) -> bool:
+    s = re.sub(r"\s", "", s).upper()
+    if not 15 <= len(s) <= 34:
+        return False
+    moved = s[4:] + s[:4]
+    digits = "".join(str(ord(c) - 55) if c.isalpha() else c for c in moved)
+    try:
+        return int(digits) % 97 == 1
+    except ValueError:
+        return False
+
+
+def _aba_ok(d: str) -> bool:
+    if len(d) != 9 or not d.isdigit():
+        return False
+    w = (3, 7, 1, 3, 7, 1, 3, 7, 1)
+    return sum(int(c) * k for c, k in zip(d, w)) % 10 == 0 and d[:2] not in ("00",)
+
+
+def classify_banking(blob: str) -> list:
+    """HAS_BANKING labels for a blob. Never raises."""
+    try:
+        out = []
+        ibans = [m.group(1) for m in _IBAN_RE.finditer(blob) if _iban_ok(m.group(1))]
+        if ibans:
+            out.append(_label("HAS_BANKING", 95, len(ibans), "iban"))
+        abas = [m.group(1) for m in _ABA_RE.finditer(blob) if _aba_ok(m.group(1))]
+        if abas:
+            out.append(_label("HAS_BANKING", 90, len(abas), "aba-routing"))
+        accts = _ACCT_RE.findall(blob)
+        if accts:
+            out.append(_label("HAS_BANKING", 70, len(accts), "account-number"))
+        xfers = _XFER_RE.findall(blob)
+        if xfers:
+            out.append(_label("HAS_BANKING", 60, len(xfers), "transfer-intent"))
+        return out
+    except Exception:
+        return []
+
+
 def classify(text: str) -> list:
     """Labels for a blob of text. Never raises: a classifier that can crash
     the gate is a denial-of-service on the user's own tooling, and the honest
@@ -116,6 +165,7 @@ def classify(text: str) -> list:
             # occasionally something else; scored below the checksummed cases.
             out.append(_label("HAS_PII", 80, len(ssns), "ssn"))
 
+        out.extend(classify_banking(blob))   # detector 1.1.0: the banking & payments watch
         return out
     except Exception:
         return []
