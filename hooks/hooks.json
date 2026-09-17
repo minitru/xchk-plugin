@@ -9,6 +9,16 @@
             "timeout": 30
           }
         ]
+      },
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/gate/xchk_compact_screen.py\"",
+            "timeout": 20
+          }
+        ]
       }
     ],
     "PreToolUse": [
