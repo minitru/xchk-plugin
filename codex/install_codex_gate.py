@@ -42,6 +42,11 @@ from pathlib import Path
 GATE = Path(__file__).resolve().parent.parent / "gate" / "xchk_hook.py"
 HOOKS = Path(os.environ.get("CODEX_HOOKS", "~/.codex/hooks.json")).expanduser()
 MARKER = "xchk_hook.py"
+# The session-intent (typed prompt) hook and the compaction screen ride along when the release shipped them
+# (27 Sep 2026): Codex fires UserPromptSubmit with Claude's fields, and SessionStart with source "compact".
+PROMPT_HOOK = GATE.parent / "xchk_prompt_hook.py"
+COMPACT_SCREEN = GATE.parent / "xchk_compact_screen.py"
+MARKERS = ("xchk_hook.py", "xchk_prompt_hook.py", "xchk_compact_screen.py")
 
 # Long enough to outlast a human deciding on an attestation (Codex's default is 600 s; the Claude
 # Code registration uses 660 so an approval prompt behaves the same on both).
@@ -91,10 +96,10 @@ def strip_ours(doc: dict) -> int:
             if not isinstance(g, dict):
                 keep.append(g)
                 continue
-            if MARKER in str(g.get("command", "")):
+            if any(m in str(g.get("command", "")) for m in MARKERS):
                 removed += 1
                 continue
-            inner = [h for h in (g.get("hooks") or []) if MARKER not in str((h or {}).get("command", ""))]
+            inner = [h for h in (g.get("hooks") or []) if not any(m in str((h or {}).get("command", "")) for m in MARKERS)]
             removed += len(g.get("hooks") or []) - len(inner)
             if inner or not g.get("hooks"):
                 g = {**g, "hooks": inner} if "hooks" in g else g
@@ -122,6 +127,12 @@ def main() -> int:
     if not args.remove:
         for name, timeout in EVENTS.items():
             doc["hooks"].setdefault(name, []).append({"hooks": [hook_entry(timeout, name)]})   # no matcher: everything
+        if PROMPT_HOOK.is_file():
+            doc["hooks"].setdefault("UserPromptSubmit", []).append({"hooks": [{"type": "command", "command": f'XCHK_HARNESS=codex python3 "{PROMPT_HOOK}"', "timeout": 20,
+                                                                                "statusMessage": "xChk: notes a fingerprint of this prompt against the run (the text never leaves the machine)"}]})
+        if COMPACT_SCREEN.is_file():
+            doc["hooks"].setdefault("SessionStart", []).append({"matcher": "compact", "hooks": [{"type": "command", "command": f'XCHK_HARNESS=codex python3 "{COMPACT_SCREEN}"', "timeout": 20,
+                                                                                                 "statusMessage": "xChk: screens the compaction summary for planted instructions"}]})
 
     if args.show:
         print(json.dumps(doc, indent=2))

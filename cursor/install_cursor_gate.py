@@ -33,6 +33,13 @@ from pathlib import Path
 GATE = Path(__file__).resolve().parent.parent / "gate" / "xchk_hook.py"
 HOOKS = Path(os.environ.get("CURSOR_HOOKS", "~/.cursor/hooks.json")).expanduser()
 MARKER = "xchk_hook.py"
+# The session-intent (typed prompt) hook on beforeSubmitPrompt (27 Sep 2026). Cursor sends the prompt with
+# conversation_id / workspace_roots rather than session_id / cwd, so it is registered only when the shipped hook
+# understands those names (the "cursor-aware" marker below) — never half-wired. Cursor has no usable compaction
+# event: preCompact fires before the summary exists and cannot act.
+PROMPT_HOOK = GATE.parent / "xchk_prompt_hook.py"
+PROMPT_AWARE = "conversation_id"
+MARKERS = ("xchk_hook.py", "xchk_prompt_hook.py")
 
 # Long enough to outlast a human deciding on an attestation. Cursor honours a
 # configured timeout well past its default (verified: a 90s block was waited
@@ -76,7 +83,7 @@ def strip_ours(doc: dict) -> int:
     """Remove only our entries, preserving anyone else's hooks."""
     removed = 0
     for name, entries in list(doc.get("hooks", {}).items()):
-        keep = [e for e in entries if MARKER not in str(e.get("command", ""))]
+        keep = [e for e in entries if not any(m in str(e.get("command", "")) for m in MARKERS)]
         removed += len(entries) - len(keep)
         if keep:
             doc["hooks"][name] = keep
@@ -103,6 +110,15 @@ def main() -> int:
             e = dict(entry())
             e["timeout"] = timeout
             doc["hooks"].setdefault(name, []).append(e)
+        try:
+            prompt_ok = PROMPT_HOOK.is_file() and PROMPT_AWARE in PROMPT_HOOK.read_text()
+        except OSError:
+            prompt_ok = False
+        if prompt_ok:
+            doc["hooks"].setdefault("beforeSubmitPrompt", []).append(
+                {"type": "command", "command": f'XCHK_HARNESS=cursor python3 "{PROMPT_HOOK}"', "timeout": 20})
+        else:
+            print("note: the shipped prompt hook does not understand Cursor's fields yet — beforeSubmitPrompt not registered", file=sys.stderr)
 
     if args.show:
         print(json.dumps(doc, indent=2))
