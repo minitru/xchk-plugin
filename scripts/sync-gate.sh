@@ -19,6 +19,10 @@ SRC="${XCHK_APP:-/Volumes/2TB-FAST/sean-overflow/src/xchk/xchk-app}/examples/cla
 cp "$SRC/hooks/xchk_hook.py" "$ROOT/gate/xchk_hook.py"
 cp "$SRC/xchk_client.py" "$ROOT/gate/xchk_client.py"
 cp "$SRC/xchk_labels.py" "$ROOT/gate/xchk_labels.py"
+# ONE DETECTOR (27 Sep 2026): the Hermes gate carries its own copy of the injection detector; it was only ever in step by
+# hand. Refresh it from the same source on every sync so every harness screens with the same bytes.
+HERMES_DIR="$(dirname "$SRC")/hermes-attestation-guardrails"
+[[ -d "$HERMES_DIR" ]] && cp "$SRC/xchk_labels.py" "$HERMES_DIR/xchk_labels.py"
 # The UserPromptSubmit intent hook joined the release 12 Sep 2026: it used to be hand-placed
 # and every re-fit wiped it (gap GR-2). Present in the source tree = shipped; absent = skipped.
 [[ -f "$SRC/hooks/xchk_prompt_hook.py" ]] && cp "$SRC/hooks/xchk_prompt_hook.py" "$ROOT/gate/xchk_prompt_hook.py"
