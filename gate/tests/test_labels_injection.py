@@ -56,7 +56,7 @@ class InjectionWatch(unittest.TestCase):
             self.assertEqual(entries(t), [], t)
 
     def test_version_bumped(self):
-        self.assertEqual(L.DETECTOR_VERSION, "1.2.1")
+        self.assertEqual(L.DETECTOR_VERSION, "1.2.2")
 
 
 if __name__ == "__main__":

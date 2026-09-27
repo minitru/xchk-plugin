@@ -20,7 +20,7 @@ class CompactInjection(unittest.TestCase):
         self.assertEqual(C.screen("The user asked for a README; I drafted it and ran the tests, 12 passing."), [])
 
     def test_version(self):
-        self.assertEqual(C.SCREEN_VERSION, "1.0.1")
+        self.assertEqual(C.SCREEN_VERSION, "1.0.2")
 
 
 if __name__ == "__main__":

@@ -85,7 +85,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None):
         except Exception:
             pass
 
-PLUGIN_VERSION = "0.1.19"
+PLUGIN_VERSION = "0.1.20"
 MAX_STDIN_BYTES = 512 * 1024
 
 
@@ -424,7 +424,46 @@ def resolve_harness(data: dict) -> str:
     return "claude"
 
 
-def _broker_resolve(harness: str) -> None:
+PIN_TTL_SEC = 7 * 24 * 3600
+
+
+def _session_pin_path(harness: str, session_id: str):
+    """Where a session's plate choice is pinned. Plate-independent on purpose: the per-plate STATE_DIR is itself
+    derived from the plate, so a pin stored there could never be found from the other plate's side. None = no
+    session id (then nothing is pinned and behaviour is as before)."""
+    sid = SESSION_ID_RE.sub("_", str(session_id or ""))[:96]
+    if not sid:
+        return None
+    root = Path(os.environ.get("XCHK_PIN_DIR", "~/.xchk/session-pins")).expanduser()
+    return root / f"{harness or 'claude'}-{sid}.json"
+
+
+def _read_pin(path):
+    if path is None or not path.is_file():
+        return None
+    try:
+        doc = json.loads(path.read_text()) or {}
+        if time.time() - float(doc.get("at") or 0) > PIN_TTL_SEC:
+            return None
+        return doc
+    except (OSError, ValueError):
+        return None
+
+
+def _write_pin(path, plate: str, marker) -> None:
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(path.parent, 0o700)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump({"plate": plate or None, "marker": marker, "cwd": str(Path.cwd()), "at": time.time()}, f)
+    except OSError:
+        pass
+
+
+def _broker_resolve(harness: str, session_id: str = "") -> None:
     """LOCAL identity broker (identity-resolution architecture, increment 3).
 
     If this session was not handed an explicit credential, walk up from cwd
@@ -447,22 +486,35 @@ def _broker_resolve(harness: str) -> None:
     if os.environ.get("XCHK_API_KEY"):
         return
     try:
-        here = Path.cwd()
-        marker = None
-        for d in (here, *here.parents):
-            cand = d / ".xchk"
-            if cand.is_file():
-                marker = cand
-                break
-        if marker is None:
-            return
-        raw = marker.read_text().strip()
-        try:
-            plate = str(json.loads(raw).get("plate") or "").strip().upper()
-        except ValueError:
-            plate = raw.split()[0].strip().upper() if raw else ""
-        if not plate or not re.fullmatch(r"[A-Z0-9-]{3,16}", plate):
-            return
+        # ONE PLATE PER SESSION (27 Sep 2026): the first resolution in a session is pinned — a plate, or "no marker:
+        # host credential" — and every later call in that session uses the pin, whatever the cwd. Before this, a
+        # session moving in and out of a marked tree flipped plates mid-session.
+        pin_path = _session_pin_path(harness, session_id)
+        pinned = _read_pin(pin_path)
+        if pinned is not None:
+            plate = pinned.get("plate") or ""
+            if not plate:
+                return                      # pinned to the host credential
+        else:
+            here = Path.cwd()
+            marker = None
+            for d in (here, *here.parents):
+                cand = d / ".xchk"
+                if cand.is_file():
+                    marker = cand
+                    break
+            plate = ""
+            if marker is not None:
+                raw = marker.read_text().strip()
+                try:
+                    plate = str(json.loads(raw).get("plate") or "").strip().upper()
+                except ValueError:
+                    plate = raw.split()[0].strip().upper() if raw else ""
+                if plate and not re.fullmatch(r"[A-Z0-9-]{3,16}", plate):
+                    plate = ""
+            _write_pin(pin_path, plate, str(marker) if marker else None)
+            if not plate:
+                return
         mgr = Path(os.environ.get("XCHK_MANAGER_DIR", "~/.xchk/manager")).expanduser()
         env_path = mgr / "envelopes" / f"{plate}.json"
         if not env_path.is_file():
@@ -488,13 +540,13 @@ def _broker_resolve(harness: str) -> None:
         return
 
 
-def apply_harness(harness: str) -> None:
+def apply_harness(harness: str, session_id: str = "") -> None:
     """Bind this process to one harness: label, config, run state. Separate
     state dirs matter — run tickets are per-install, and one dir would let a
     Cursor session load a Claude session's ticket on a session_id collision."""
     # Resolve brokered identity FIRST, so STATE_DIR/CONFIG_PATH below are
     # computed from the envelope's env exactly as from an explicit launch.
-    _broker_resolve(harness)
+    _broker_resolve(harness, session_id)
     global HARNESS, HARNESS_LABEL, STATE_DIR, CONFIG_PATH
     HARNESS = harness or "claude"
     HARNESS_LABEL = HARNESS_LABELS.get(HARNESS, HARNESS.title())
@@ -1534,7 +1586,7 @@ def main() -> None:
     if not isinstance(data, dict):
         sys.exit(0)
 
-    apply_harness(resolve_harness(data))
+    apply_harness(resolve_harness(data), str(data.get("session_id") or data.get("conversationId") or ""))
     if HARNESS == "antigravity":
         # the event rides argv (`--event PreToolUse`): Antigravity's JSON does not name it
         ev_arg = next((sys.argv[i + 1] for i, a in enumerate(sys.argv[:-1]) if a == "--event"), "")

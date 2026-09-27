@@ -43,11 +43,13 @@ def main() -> None:
         client = gate.make_client(cfg)
         if not getattr(client, "configured", False):
             return
-        session_id = str(data.get("session_id") or "")
+        # Cursor sends conversation_id; Antigravity-style payloads conversationId (27 Sep 2026)
+        session_id = str(data.get("session_id") or data.get("conversation_id") or data.get("conversationId") or "")
         run = gate.load_run(session_id) or gate.dispatch(client, session_id)
         tty = gate.controlling_tty()
         host = socket.gethostname().split(".")[0]
-        cwd = str(data.get("cwd") or os.getcwd())
+        roots = data.get("workspace_roots") or data.get("workspacePaths") or []
+        cwd = str(data.get("cwd") or (roots[0] if isinstance(roots, list) and roots else "") or os.getcwd())
         body = {
             "promptHash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "promptLength": len(prompt),
@@ -63,5 +65,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        # Cursor reads this event's answer from stdout; this hook never blocks, so the answer is always "continue".
+        if os.environ.get("XCHK_HARNESS") == "cursor":
+            print(json.dumps({"continue": True}))
     sys.exit(0)
