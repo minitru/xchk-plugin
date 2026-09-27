@@ -96,8 +96,10 @@ python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$SRC/hooks/xch
 # ---------- 2. commit source of truth ----------
 say "2. commit + push xchk-app source of truth"
 ( cd "$APP" \
-  && git add examples/claude-attestation-guardrails/hooks/xchk_hook.py \
-  && git commit -q -m "gate source: PLUGIN_VERSION $NEW_VER (engine-block telemetry + destructive-fs escalation release)" \
+  && for f in hooks/xchk_hook.py hooks/xchk_prompt_hook.py hooks/xchk_compact_screen.py xchk_client.py xchk_labels.py install-claude-xchk.sh; do \
+       if [[ -f "examples/claude-attestation-guardrails/$f" ]]; then git add "examples/claude-attestation-guardrails/$f"; fi; done \
+  && if [[ -f examples/hermes-attestation-guardrails/xchk_labels.py ]]; then git add examples/hermes-attestation-guardrails/xchk_labels.py; fi \
+  && git commit -q -m "gate source: PLUGIN_VERSION $NEW_VER" \
   && git push -q && ok "xchk-app $(git log --oneline -1)" ) || die "xchk-app commit/push failed"
 
 # ---------- 3. re-vendor + manifests ----------
@@ -154,6 +156,17 @@ echo "$REG" | grep -q "\"manifestSha\":\"$STAND_SHA\"" \
   || die "registry's standalone manifest for $NEW_VER is not ours. registry said: $REG"
 ok "registry holds our standalone manifest for $NEW_VER (${STAND_SHA:0:12}…) — public, verifiable by anyone"
 
+# ---------- 6b. deploy the app tree the installers FETCH FROM ----------
+# A re-fit runs `curl <registry>/examples/claude-attestation-guardrails/... | bash`, i.e. it
+# takes the hook from the registry's checkout of xchk-app — NOT from the manifest published in
+# step 6. On 12 Sep 2026 a re-fit two minutes after a release laid down the previous version
+# because this checkout had not been pulled. Pull it on every registry before anyone re-fits.
+say "6b. deploy xchk-app on the registries (the tree re-fits fetch from)"
+for h in ${XCHK_DEPLOY_HOSTS:-in.xchk.io xchk.me}; do
+  ssh -o ConnectTimeout=15 "sean@$h" "cd /var/www/xchk-app && git pull -q && grep -m1 '^PLUGIN_VERSION' examples/claude-attestation-guardrails/hooks/xchk_hook.py" \
+    | grep -q "\"$NEW_VER\"" && ok "$h serves $NEW_VER" || die "$h does not serve $NEW_VER — pull /var/www/xchk-app there before any re-fit"
+done
+
 # ---------- 7. install to live ----------
 say "7. install to LIVE gate ($LIVE)"
 cp "$LIVE/hooks/xchk_hook.py" "$LIVE/hooks/xchk_hook.py.bak.release.$STAMP"
@@ -185,7 +198,7 @@ echo "   Backups: *.bak.release.$STAMP beside each replaced live file."
 #   The publish route wants a Bearer token that resolves to a User with
 #   siteAdmin=true: your own Firebase ID token from a logged-in console
 #   session. In the console (pewpew.html) open DevTools → Console and run:
-#       await firebase.auth().currentUser.getIdToken(true)
+#       await getIdToken()
 #   copy the string (valid ~1 hour), then in your terminal:
 #       export XCHK_ADMIN_TOKEN='<paste>'
 #   Agent API keys are refused by design — the gate must never bless itself.
