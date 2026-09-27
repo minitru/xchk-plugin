@@ -97,9 +97,22 @@ rc, out = run({"hook_event_name": "preToolUse", "tool_name": "Write",
 check("internal scratch is deferred, not decided", rc == 0 and out == "",
       f"rc={rc} out={out!r}")
 
+# An UNKNOWN tool is gated, not deferred: the coverage boundary is inverted (UNGATED_TOOLS is the only way
+# past the licence), so a connector or tool shipped after the gate is covered the day it appears. With no
+# licence configured the gate fails closed. (This check used to expect a pass-through — the rule it tested
+# was retired when the catch-all landed; corrected 27 Sep 2026.)
 rc, out = run({"hook_event_name": "preToolUse", "tool_name": "SomeFutureTool",
                "tool_input": {}, "session_id": "t2", "cursor_version": "3.14.7"})
-check("ungated tool is deferred", rc == 0 and out == "", f"rc={rc} out={out!r}")
+try:
+    decision = (json.loads(out).get("hookSpecificOutput") or {}).get("permissionDecision")
+except ValueError:
+    decision = None
+check("unknown tool is gated (fails closed when unlicensed)", rc == 0 and decision == "deny", f"rc={rc} out={out!r}")
+
+# An explicitly ungated, read-only tool IS deferred to Cursor's own permission flow: no answer at all.
+rc, out = run({"hook_event_name": "preToolUse", "tool_name": "Grep",
+               "tool_input": {"pattern": "x"}, "session_id": "t3", "cursor_version": "3.14.7"})
+check("explicitly ungated tool is deferred", rc == 0 and out == "", f"rc={rc} out={out!r}")
 
 print()
 if FAILURES:
