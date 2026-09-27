@@ -121,7 +121,7 @@ say "4. commit xchk-plugin"
   && git add gate/ MANIFEST.sha256 MANIFEST.standalone.sha256 \
   && { [[ -f plugin.json ]] && git add plugin.json || true; } \
   && { [[ -f .claude-plugin/plugin.json ]] && git add .claude-plugin/plugin.json || true; } \
-  && git commit -q -m "xchk-plugin v$NEW_VER — engine-block telemetry + destructive-fs escalation; manifests match the running gate" \
+  && git commit -q -m "xchk-plugin v$NEW_VER — manifests match the running gate" \
   && ok "xchk-plugin $(git log --oneline -1)" ) || die "xchk-plugin commit failed (nothing to commit is also a failure here — the bump should have changed files)"
 
 # ---------- 5. signed tag ----------
