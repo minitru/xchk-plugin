@@ -104,6 +104,7 @@ def main() -> int:
 
     doc = load()
     removed = strip_ours(doc)  # re-point cleanly rather than accumulate
+    prompt_ok = False
 
     if not args.remove:
         for name, timeout in EVENTS.items():
@@ -130,11 +131,14 @@ def main() -> int:
     if args.remove:
         print(f"removed {removed} xchk hook(s) from {HOOKS}")
     else:
-        print(f"registered {len(EVENTS)} xchk hooks in {HOOKS}"
+        n = len(EVENTS) + (1 if prompt_ok else 0)
+        print(f"registered {n} xchk hooks in {HOOKS}"
+              + (" (incl. beforeSubmitPrompt)" if prompt_ok else "")
               + (f" (replaced {removed} stale)" if removed else ""))
         print(f"gate: {GATE}")
-        print("next: put the Cursor install's API key in ~/.xchk/cursor.json "
-              "(same shape as ~/.xchk/claude.json), then restart Cursor.")
+        print("next: the key. Setup -> Cover (or RE-FIT on the machine licence) writes ~/.xchk/cursor.json;\n"
+              "      that also re-points these hooks at the released copy in ~/.xchk/cursor-plugin, which is\n"
+              "      the normal install. This script is for gate development. Then restart Cursor.")
     return 0
 
 
