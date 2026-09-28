@@ -85,7 +85,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None):
         except Exception:
             pass
 
-PLUGIN_VERSION = "0.1.20"
+PLUGIN_VERSION = "0.1.21"
 MAX_STDIN_BYTES = 512 * 1024
 
 
@@ -1037,7 +1037,9 @@ def on_session_start(data: dict, cfg: dict, client: XchkClient) -> None:
 
 
 def summarize(tool_name: str, tool_input: dict) -> str:
-    if tool_name == "Bash":
+    # Any terminal tool, not just Claude's "Bash": Cursor calls it "Shell" and it used to fall through to the path
+    # branch, so the approver saw "Shell " with no command (27 Sep 2026).
+    if tool_name == "Bash" or TOOL_MAP.get(tool_name) == "terminal":
         return str(tool_input.get("command") or "")[:300]
     if tool_name in SPAWN_TOOLS:
         # Task/Agent: {description, prompt, subagent_type}. Workflow: a script
