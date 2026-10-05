@@ -9,6 +9,10 @@ decisions that ran and were never reported on — the "owned unknown" of an agen
 Self-reported by the host, like the recorder: evidence for recovery and reconciliation, not proof of effect at
 the target. Never blocks, never speaks: no output, exit 0 on every path. A failure here must not touch the session.
 The tool's output itself never leaves the host — only its hash.
+
+5 Oct 2026: when the tool wrote a file, the report also carries the sha256 of that file as it stands after the
+write (`artifactHash`). Sealed with the outcome record, it lets anyone holding the file check it against the run
+that wrote it. The file never leaves the host either.
 """
 from __future__ import annotations
 
@@ -37,6 +41,29 @@ def _status(resp) -> str:
         if isinstance(code, int) and code != 0:
             return "failed"
     return "completed"
+
+
+MAX_ARTIFACT_BYTES = 256 * 1024 * 1024   # a file larger than this is not hashed: this hook must stay quick
+FILE_WRITE_WIRES = ("write_file", "patch")
+
+
+def _artifact_hash(tool_input: dict):
+    """sha256 of the file a write tool just left on disk, or None. None means "not reported", never a guess: a
+    missing path, a file that is not a regular file, one too large, or one that cannot be read."""
+    path = tool_input.get("file_path") or tool_input.get("notebook_path")
+    if not path or not isinstance(path, str):
+        return None
+    try:
+        p = Path(path)
+        if not p.is_file() or p.stat().st_size > MAX_ARTIFACT_BYTES:
+            return None
+        digest = hashlib.sha256()
+        with p.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except Exception:
+        return None
 
 
 def main() -> None:
@@ -77,6 +104,10 @@ def main() -> None:
             "resultHash": result_hash,
             "endedAt": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "Z",
         }
+        if mapped in FILE_WRITE_WIRES and body["status"] == "completed":
+            artifact = _artifact_hash(tool_input)
+            if artifact:
+                body["artifactHash"] = artifact
         run = gate.load_run(session_id)
         if run and run.get("runSeq") is not None:
             body["runSeq"] = run["runSeq"]
