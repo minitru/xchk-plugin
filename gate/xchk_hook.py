@@ -85,7 +85,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None):
         except Exception:
             pass
 
-PLUGIN_VERSION = "0.1.22"
+PLUGIN_VERSION = "0.1.23"
 MAX_STDIN_BYTES = 512 * 1024
 
 
@@ -1491,7 +1491,11 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
         decide("deny", f"xchk: forbidden by license grant (area {area}): {auth.get('reason') or 'forbid'}")
 
     # attest — human approval required
-    approver = cfg.get("approver")
+    # WHO IS ASKED (10 Oct 2026; Sean: "the registrant should be the approver on a learner's plate"): the approver
+    # this machine was fitted with; when it has none, the one the registry names with the hold (a claimed
+    # learner's plate's registrant). With neither, the refusal below stands.
+    named = auth.get("approver")
+    approver = cfg.get("approver") or (named.strip() if isinstance(named, str) and "@" in named else None)
     if not approver:
         # A licensed plate reaching attest with no approver is a malformed
         # install: this action requires a human, and there is no independent

@@ -193,6 +193,9 @@ class XchkClient:
                 "disposition": "attest",
                 "area": (data or {}).get("area"),
                 "authorizeSessionId": (data or {}).get("authorizeSessionId"),
+                # who the registry says answers, when it names one (a claimed learner's plate's registrant,
+                # 10 Oct 2026); the hook uses it only when this machine was fitted with no approver
+                "approver": (data or {}).get("approver"),
                 **ref,
             }
 
