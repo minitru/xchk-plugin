@@ -132,7 +132,9 @@ say "5. signed tag v$NEW_VER + push --follow-tags"
     git tag -d "v$NEW_VER" >/dev/null
     git push -q origin ":refs/tags/v$NEW_VER" || true
   fi
-  git tag -s "v$NEW_VER" -m "xchk-plugin v$NEW_VER — engine-block telemetry + destructive-fs escalation; manifests match the running gate"
+  # 10 Oct 2026: the message named what 0.1.8 carried and was stamped on every release since. It says only what is
+  # true of any release; what changed is in the xchk-app commits the tag follows.
+  git tag -s "v$NEW_VER" -m "xchk-plugin v$NEW_VER — manifests match the running gate"
   git push -q --follow-tags
   ok "tag v$NEW_VER → $(git rev-parse --short "v$NEW_VER^{commit}") pushed" ) || die "tagging/push failed (is your signing key available?)"
 fi  # end of steps 1-5 (skipped on resume)
@@ -193,6 +195,12 @@ echo "   registry's verdict matches-release. Run any gated command, then have Cl
 echo "   read the panel: the 'Gate integrity' row should flip ALARM → ENGAGED."
 echo
 echo "   Backups: *.bak.release.$STAMP beside each replaced live file."
+# 10 Oct 2026: this publishes to ONE registry ($BASE). The other was forgotten once and then failed twice on a token
+# from the wrong account, so the reminder is printed with what it needs.
+echo
+echo "   Published to $BASE only. Every other registry needs the same release published to it, with a"
+echo "   token from an ADMIN OF THAT REGISTRY (a valid token for anyone else answers 'Admin required'):"
+echo "       XCHK_BASE=https://<other registry> bash $0 $NEW_VER publish"
 
 # NOTES — getting XCHK_ADMIN_TOKEN
 #   The publish route wants a Bearer token that resolves to a User with
