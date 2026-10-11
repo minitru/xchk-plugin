@@ -389,6 +389,7 @@ class XchkClient:
         session_ref: Optional[str] = None,
         task_label: Optional[str] = None,
         ttl_seconds: Optional[int] = None,
+        session_id: Optional[str] = None,
         grant_mask: Optional[list] = None,
         revoke_on: Optional[list] = None,
     ) -> Optional[Dict[str, Any]]:
@@ -410,6 +411,10 @@ class XchkClient:
             body["harness"] = harness
         if session_ref:
             body["sessionRef"] = str(session_ref)[:128]
+        # 10 Oct 2026: the harness's own session id, whole. Claude Code sends the same id on every model call
+        # (x-claude-code-session-id), so a gateway can ask the registry which plate and run a call belongs to.
+        if session_id:
+            body["sessionId"] = str(session_id)[:128]
         if task_label:
             body["taskLabel"] = str(task_label)[:140]
         if ttl_seconds is not None:

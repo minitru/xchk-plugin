@@ -85,7 +85,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None):
         except Exception:
             pass
 
-PLUGIN_VERSION = "0.1.23"
+PLUGIN_VERSION = "0.1.24"
 MAX_STDIN_BYTES = 512 * 1024
 
 
@@ -727,7 +727,7 @@ def dispatch(client: XchkClient, session_id: str) -> dict | None:
     host = socket.gethostname().split(".")[0]
     session_ref = f"{tty or 'tty?'}@{host}#{(session_id or '')[:8]}"
     resp = client.dispatch_run(harness=HARNESS, session_ref=session_ref,
-                               task_label=task_label)
+                               task_label=task_label, session_id=session_id or None)
     if not resp:
         return None
     run_info = resp.get("run") or {}
@@ -768,29 +768,26 @@ _EVENTS = {
 _LICENSE_HEADER = "X-Xchk-License"
 
 
-def stamp_license_header(plate: str) -> None:
-    """Put the plate into ~/.claude/settings.json env.ANTHROPIC_CUSTOM_HEADERS
-    so EVERY claude session on this host — user-launched included — stamps
-    'X-Xchk-License: <plate>' on every model call, for a corp gateway to log
-    and query by plate. Claude Code reads that env once at startup, so this is
-    static (plate scope, not run) and self-heals: the gate learns the plate at
-    dispatch and writes it, and every session from then on carries it.
+def clear_license_header() -> None:
+    """Take the plate back OUT of ~/.claude/settings.json env.ANTHROPIC_CUSTOM_HEADERS.
 
-    Claude only. Cursor routes model calls through its own backend and Hermes
-    through its own runtime; neither honours ANTHROPIC_CUSTOM_HEADERS, so their
-    plate injection is a separate vector.
+    10 Oct 2026 (Sean: "no we should make it accurate", "stop writing the old stamp"). Until today the gate wrote
+    'X-Xchk-License: <plate>' there at every session start, for a company gateway to log. It was one value for the
+    whole machine, Claude Code reads it before the session's own gate has run, and it is handed down to every
+    process Claude Code starts; on a machine with two plates the model calls of one were labelled with the other
+    (seen on bunnymini: ENG-STAGE on calls made under CMP-YJ2T). A wrong label is worse than none.
 
-    Surgical: loads the whole settings file, touches only
-    env.ANTHROPIC_CUSTOM_HEADERS, preserves every other env var and any other
-    custom header lines, replaces (never duplicates) a prior X-Xchk-License,
-    and writes only when the value actually changes — so it does not churn the
-    user's settings on every session.
+    What names the session now is the harness's own id: Claude Code sends x-claude-code-session-id on every model
+    call, the gate reports the same id at dispatch, and the registry answers which plate and run it is.
+
+    Surgical, as the writer was: touches only our own header line, keeps every other header and every other env
+    var, and writes only when there is a line of ours to take out.
     """
-    if HARNESS != "claude" or not plate:
+    if HARNESS != "claude":
         return
     path = Path("~/.claude/settings.json").expanduser()
     if not path.is_file():
-        return  # the gate runs FROM this file — missing means don't conjure one
+        return
     try:
         settings = json.loads(path.read_text())
     except (OSError, ValueError):
@@ -799,24 +796,28 @@ def stamp_license_header(plate: str) -> None:
         return
     env = settings.get("env")
     if not isinstance(env, dict):
-        env = {}
-    raw = env.get("ANTHROPIC_CUSTOM_HEADERS") or ""
-    # Header lines are newline-separated "Name: value"; keep everyone else's.
-    kept = [ln for ln in raw.split("\n")
-            if ln.strip() and not ln.strip().lower().startswith(_LICENSE_HEADER.lower() + ":")]
-    kept.append(f"{_LICENSE_HEADER}: {plate}")
-    new_value = "\n".join(kept)
-    if raw == new_value:
-        return  # already correct — do not rewrite the file
-    env["ANTHROPIC_CUSTOM_HEADERS"] = new_value
-    settings["env"] = env
+        return
+    raw = env.get("ANTHROPIC_CUSTOM_HEADERS")
+    if not isinstance(raw, str) or not raw:
+        return
+    lines = [ln for ln in raw.split("\n") if ln.strip()]
+    kept = [ln for ln in lines if not ln.strip().lower().startswith(_LICENSE_HEADER.lower() + ":")]
+    if len(kept) == len(lines):
+        return  # nothing of ours there
+    if kept:
+        env["ANTHROPIC_CUSTOM_HEADERS"] = "\n".join(kept)
+    else:
+        del env["ANTHROPIC_CUSTOM_HEADERS"]
+    if env:
+        settings["env"] = env
+    else:
+        del settings["env"]
     try:
         tmp = path.with_suffix(".json.xchk-tmp")
         tmp.write_text(json.dumps(settings, indent=2))
         tmp.replace(path)  # atomic — a half-written settings.json bricks claude
     except OSError:
         pass
-
 
 def emit(event: str, extra: dict) -> None:
     # Cursor maps Claude Code's nested permissionDecision to its own permission
@@ -1020,10 +1021,9 @@ def on_session_start(data: dict, cfg: dict, client: XchkClient) -> None:
     )
     session_id = data.get("session_id") or ""
     run = load_run(session_id) or dispatch(client, session_id)
-    # Stamp the plate into the host's model-call headers for the corp gateway.
-    # Written every session but no-ops unless the value changed, so it settles
-    # after the first dispatch and stays put.
-    stamp_license_header((run or {}).get("plate"))
+    # 10 Oct 2026: the plate is no longer written into the machine's model-call headers (it named the wrong
+    # plate on a machine with two); the line an earlier gate wrote is taken out. See clear_license_header.
+    clear_license_header()
     stamp_terminal_title(run)
     write_run_file(run, cfg)
     if run and run.get("runRef"):
