@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""xChk outcome hook (PostToolUse) — "allowed" is not "done". 2 Oct 2026.
+"""xChk outcome hook (PostToolUse, PostToolUseFailure) — "allowed" is not "done". 2 Oct 2026.
 
 The gate records that an action was AUTHORIZED. This hook, run by the harness after the tool has returned, tells
 the registry how it ENDED: completed or failed, with a digest of the result the harness saw and the time. The
@@ -28,6 +28,12 @@ sys.path.insert(0, str(PLUGIN_ROOT))
 sys.path.insert(0, str(PLUGIN_ROOT / "hooks"))
 
 MAX_STDIN_BYTES = 4 * 1024 * 1024   # tool results can be large; the hash is taken over what the harness sent
+
+# 13 Oct 2026: Claude Code tells a hook about a tool that FAILED on its own event, PostToolUseFailure, not on
+# PostToolUse. This hook was registered for PostToolUse alone and refused any other event, so a failed tool was never
+# reported and its decision read "outcome unknown" for good. Seen on ENG-WNP3: 47 tool calls that returned an error
+# across about 1,700, 47 decisions with no ending, and not one outcome record marked failed for any tool.
+ENDED_EVENTS = ("posttooluse", "posttoolusefailure")
 
 
 def _status(resp) -> str:
@@ -74,8 +80,10 @@ def main() -> None:
         return
     if not isinstance(data, dict):
         return
-    if str(data.get("hook_event_name") or "").lower() != "posttooluse":
+    event = str(data.get("hook_event_name") or "").lower()
+    if event not in ENDED_EVENTS:
         return
+    tool_failed = event == "posttoolusefailure"
     tool_name = str(data.get("tool_name") or "")
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     if not tool_name:
@@ -95,12 +103,13 @@ def main() -> None:
             mapped = gate.CATCHALL_WIRE
         # The same summary the gate sent when it asked: that is how the registry finds the decision.
         summary = gate.summarize(tool_name, tool_input) or f"{gate.HARNESS_LABEL} {tool_name}"
-        resp = data.get("tool_response")
+        # a failed tool has no response; what the harness says of the failure is what is hashed
+        resp = {"error": data.get("error"), "is_interrupt": data.get("is_interrupt")} if tool_failed else data.get("tool_response")
         result_hash = hashlib.sha256(json.dumps(resp, sort_keys=True, default=str, ensure_ascii=False).encode("utf-8")).hexdigest()
         body = {
             "tool": mapped,
             "summary": summary[:400],
-            "status": _status(resp),
+            "status": "failed" if tool_failed else _status(resp),
             "resultHash": result_hash,
             "endedAt": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "Z",
         }
