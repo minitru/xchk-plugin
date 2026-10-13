@@ -3,7 +3,12 @@
 
 Every prompt the person types is an intent. This hook sends the registry a DIGEST of it
 (sha256, length, a hash of the working directory) bound to this session's run, so a later
-intent-alignment verdict has something to bind to. The prompt text never leaves the host.
+intent-alignment verdict has something to bind to.
+
+The prompt text leaves the host in one case only (12 Oct 2026): the plate's owner turned request
+sharing on, the registry said so when this run opened, and the session was told at its start. Then
+the opening characters go too, unless they look like they hold a secret, a card, a bank detail or
+personal data, in which case only the digest goes, as before. See objective_for.
 
 Never blocks, never speaks: no output, exit 0 on every path. A failure here must not be able
 to touch the conversation. Rewritten 12 Sep 2026 after the hand-placed original was wiped by
@@ -23,6 +28,25 @@ sys.path.insert(0, str(PLUGIN_ROOT))
 sys.path.insert(0, str(PLUGIN_ROOT / "hooks"))
 
 MAX_STDIN_BYTES = 512 * 1024
+WITHHELD_LABELS = {"CREDENTIALS", "HAS_PAYMENT", "HAS_PII", "HAS_BANKING"}
+
+
+def objective_for(prompt: str, run, chars: int, classify) -> str | None:
+    """The opening of a request, when this run may send it and it is safe to send; else None.
+    Refuses on every doubt: no run, no true from the registry, a classifier that is missing or
+    fails, or any label that says the text holds something that must not travel."""
+    if not isinstance(run, dict) or run.get("sendObjective") is not True or classify is None:
+        return None
+    text = prompt.strip()[:chars]
+    if not text:
+        return None
+    try:
+        labels = classify(text)
+    except Exception:
+        return None
+    if any((l or {}).get("label") in WITHHELD_LABELS for l in labels):
+        return None
+    return text
 
 
 def main() -> None:
@@ -59,6 +83,14 @@ def main() -> None:
         }
         if run and run.get("runSeq") is not None:
             body["runSeq"] = run.get("runSeq")
+        try:
+            import xchk_labels
+            classify = xchk_labels.classify
+        except Exception:
+            classify = None
+        objective = objective_for(prompt, run, gate.OBJECTIVE_CHARS, classify)
+        if objective:
+            body["declaredObjective"] = objective
         client.request("POST", "/api/agents/session-intent", body=body, timeout=5)
     except Exception:
         return

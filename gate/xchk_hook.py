@@ -85,7 +85,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None):
         except Exception:
             pass
 
-PLUGIN_VERSION = "0.1.24"
+PLUGIN_VERSION = "0.1.25"
 MAX_STDIN_BYTES = 512 * 1024
 
 
@@ -660,6 +660,9 @@ def state_path(session_id: str) -> Path:
     return STATE_DIR / f"{safe}.json"
 
 
+OBJECTIVE_CHARS = 400   # what the registry keeps of a request; the same bound as its requestSharingService
+
+
 def load_run(session_id: str) -> dict | None:
     p = state_path(session_id)
     if not p.exists():
@@ -748,6 +751,9 @@ def dispatch(client: XchkClient, session_id: str) -> dict | None:
         "ticket": resp.get("runTicket"),
         "startedAt": time.time(),
         "expiresAt": expires,
+        # 12 Oct 2026: the registry says whether this plate sends the opening of each request (its owner's switch).
+        # Only a true from the registry counts; a machine cannot turn this on for itself.
+        "sendObjective": resp.get("sendObjective") is True,
     }
     save_run(session_id, run)
     return run
@@ -1032,6 +1038,11 @@ def on_session_start(data: dict, cfg: dict, client: XchkClient) -> None:
                 f"This session operates under xChk license {run.get('plate') or ''} "
                 f"as run {run.get('runRef')}. Gated actions require authorization; "
                 f"some will wait for human approval."
+                # told to whoever is in the session, every time it starts (Sean, 12 Oct 2026: "we can do
+                # whatever provided we tell the user. If it's enabled, it sends prompts")
+                + (f" The first {OBJECTIVE_CHARS} characters of each request typed here are sent to the "
+                   f"xChk registry and kept on this plate's record; its owner turned that on."
+                   if run.get("sendObjective") is True else "")
             ),
         })
 
