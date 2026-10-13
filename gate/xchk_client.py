@@ -666,20 +666,34 @@ class LocalRecorder:
             json.dump(self.state, fh)
         os.replace(tmp, self.path)
 
+    @staticmethod
+    def _file_lock(fh, on):
+        """Take or release an exclusive lock on an open file. fcntl where it exists; on Windows, where it does not,
+        msvcrt on the file's first byte (13 Oct 2026). Before this the import failed on Windows, _locked swallowed
+        the failure, and the local chain recorded NOTHING there. msvcrt waits about ten seconds for a held lock and
+        then raises; _locked treats that as it treats any failure: this entry is not recorded."""
+        try:
+            import fcntl
+        except ImportError:
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK if on else msvcrt.LK_UNLCK, 1)
+            return
+        fcntl.flock(fh, fcntl.LOCK_EX if on else fcntl.LOCK_UN)
+
     def _locked(self, fn):
         """EX-lock -> fresh reload -> mutate -> save. Exception-safe: recording
         must never affect an authorization decision."""
         try:
-            import fcntl
             with open(self.path + ".lock", "w") as lk:
-                fcntl.flock(lk, fcntl.LOCK_EX)
+                self._file_lock(lk, True)
                 try:
                     self._read()
                     out = fn()
                     self._save()
                     return out
                 finally:
-                    fcntl.flock(lk, fcntl.LOCK_UN)
+                    self._file_lock(lk, False)
         except Exception:
             return None
 
