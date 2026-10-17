@@ -96,7 +96,7 @@ python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$SRC/hooks/xch
 # ---------- 2. commit source of truth ----------
 say "2. commit + push xchk-app source of truth"
 ( cd "$APP" \
-  && for f in hooks/xchk_hook.py hooks/xchk_prompt_hook.py hooks/xchk_compact_screen.py xchk_client.py xchk_labels.py install-claude-xchk.sh; do \
+  && for f in hooks/xchk_hook.py hooks/xchk_prompt_hook.py hooks/xchk_compact_screen.py hooks/xchk_outcome_hook.py hooks/xchk_act_reading.py xchk_client.py xchk_labels.py install-claude-xchk.sh; do \
        if [[ -f "examples/claude-attestation-guardrails/$f" ]]; then git add "examples/claude-attestation-guardrails/$f"; fi; done \
   && if [[ -f examples/hermes-attestation-guardrails/xchk_labels.py ]]; then git add examples/hermes-attestation-guardrails/xchk_labels.py; fi \
   && git commit -q -m "gate source: PLUGIN_VERSION $NEW_VER" \
