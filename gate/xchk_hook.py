@@ -85,7 +85,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None):
         except Exception:
             pass
 
-PLUGIN_VERSION = "0.1.26"
+PLUGIN_VERSION = "0.1.27"
 MAX_STDIN_BYTES = 512 * 1024
 
 
@@ -1370,6 +1370,27 @@ def _lockdown_guard(auth: dict, cfg: dict, client: XchkClient) -> dict:
     return auth
 
 
+def start_act_reading(cfg: dict, client: XchkClient, session_id: str, auth: dict, summary: str) -> None:
+    """The act against the content it just read, made on this host by hooks/xchk_act_reading.py, DETACHED so the
+    gate's answer is not delayed (17 Oct 2026, shadow: it records a number, decides nothing). Only with a key in
+    the config (`jev_api_key`); the keys travel in the child's environment, never on argv."""
+    key = str(cfg.get("jev_api_key") or "").strip()
+    if not key or not auth.get("authRef") or auth.get("disposition") not in ("allow", "attest"):
+        return
+    try:
+        import subprocess
+        env = dict(os.environ)
+        env["XCHK_JEV_KEY"] = key
+        env["XCHK_API_KEY"] = str(client.api_key or "")
+        subprocess.Popen([sys.executable, "-I", str(Path(__file__).resolve().parent / "xchk_act_reading.py"),
+                          str(STATE_DIR), session_id, str(auth.get("authRef")), client.base_url, "XCHK_JEV_KEY",
+                          summary[:400]],
+                         env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True, close_fds=True)
+    except Exception:
+        pass
+
+
 def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
     tool_name = data.get("tool_name") or ""
     tool_input = data.get("tool_input") or {}
@@ -1495,6 +1516,7 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
     auth = _lockdown_guard(auth, cfg, client)
 
     area = auth.get("area") or "?"
+    start_act_reading(cfg, client, session_id, auth, summary or tool_name)
     if auth.get("disposition") == "allow":
         _record(auth.get("authRef"), mapped, summary or tool_name, client, auth.get("paramsHash"))
         decide("allow", f"xchk: allowed under {run_ref} (area {area})")

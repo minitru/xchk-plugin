@@ -121,6 +121,22 @@ def main() -> None:
         if run and run.get("runSeq") is not None:
             body["runSeq"] = run["runSeq"]
         client.request("POST", "/api/agents/outcome", body=body, timeout=5)
+        # 17 Oct 2026: the answer stays on the host, for the act-against-content reading made at the next act
+        # (xchk_act_reading.py). Cut at 6,000 characters, the paper's limit; past it the content is not read.
+        try:
+            import xchk_act_reading
+            text = xchk_act_reading.answer_text(resp) if not tool_failed else ""
+            keep = {"tool": mapped, "text": text[:xchk_act_reading.CONTENT_CHARS],
+                    "cut": len(text) > xchk_act_reading.CONTENT_CHARS, "chars": len(text),
+                    "hash": hashlib.sha256(text.encode("utf-8")).hexdigest(), "at": time.time()}
+            sp = gate.state_path(session_id)
+            p = sp.with_name(sp.stem + ".last-answer.json")
+            gate.STATE_DIR.mkdir(parents=True, exist_ok=True)
+            fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump(keep, f)
+        except Exception:
+            pass
     except Exception:
         return
 

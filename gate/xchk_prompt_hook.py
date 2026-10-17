@@ -92,6 +92,21 @@ def main() -> None:
         if objective:
             body["declaredObjective"] = objective
         client.request("POST", "/api/agents/session-intent", body=body, timeout=5)
+        # 17 Oct 2026: the requests stay on the host, for the act-against-content reading (xchk_act_reading.py)
+        try:
+            import time as _time
+            sp = gate.state_path(session_id)
+            p = sp.with_name(sp.stem + ".requests.json")
+            prior = []
+            if p.is_file():
+                prior = (json.loads(p.read_text()) or {}).get("requests") or []
+            prior = ([r for r in prior if isinstance(r, str)] + [prompt.strip()[:2000]])[-6:]
+            gate.STATE_DIR.mkdir(parents=True, exist_ok=True)
+            fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump({"requests": prior, "at": _time.time()}, f)
+        except Exception:
+            pass
     except Exception:
         return
 
