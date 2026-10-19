@@ -242,6 +242,8 @@ def protected_roots() -> list:
         home / ".codex" / "config.toml",           # Codex hooks trust hash + MCP wrapper binding
         home / ".gemini" / "config" / "hooks.json",      # Antigravity hook registration (re-read live)
         home / ".gemini" / "config" / "mcp_config.json", # Antigravity MCP wrapper binding
+        home / ".copilot" / "hooks",                     # Copilot CLI hook files (19 Oct 2026)
+        home / ".copilot" / "settings.json",             # Copilot CLI settings: carries disableAllHooks (19 Oct 2026)
         *(home / n for n in SHELL_INIT_NAMES),     # future-session environment
     ]
 
