@@ -85,7 +85,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None):
         except Exception:
             pass
 
-PLUGIN_VERSION = "0.1.28"
+PLUGIN_VERSION = "0.1.29"
 MAX_STDIN_BYTES = 512 * 1024
 
 
@@ -240,6 +240,9 @@ def protected_roots() -> list:
         # can be unhooked through its OWN files; they are gate-critical exactly like settings.json.
         home / ".codex" / "hooks.json",            # Codex hook registration
         home / ".codex" / "config.toml",           # Codex hooks trust hash + MCP wrapper binding
+        # 25 Oct 2026: Codex's rules folder carries xchk.rules, the backstop for a hook that cannot start; ONE
+        # unparseable .rules file there makes Codex drop every rule, so the whole folder is gate-critical.
+        home / ".codex" / "rules",
         home / ".gemini" / "config" / "hooks.json",      # Antigravity hook registration (re-read live)
         home / ".gemini" / "config" / "mcp_config.json", # Antigravity MCP wrapper binding
         home / ".copilot" / "hooks",                     # Copilot CLI hook files (19 Oct 2026)
@@ -770,6 +773,7 @@ _EVENTS = {
     "pretooluse": "PreToolUse",
     "stop": "Stop",
     "sessionend": "SessionEnd",
+    "permissionrequest": "PermissionRequest",   # Codex (25 Oct 2026): see on_permission_request
 }
 
 
@@ -879,6 +883,82 @@ def apply_amendment(mapped: str, tool_input: dict, amendment: dict | None) -> tu
 
 RUNS_DIR = Path("~/.xchk/runs").expanduser()
 
+
+
+# CODEX PERMISSIONREQUEST (25 Oct 2026; Sean: "the gate answers Codex's PermissionRequest hook"). Codex asks for
+# approval AFTER PreToolUse, when a rule (xchk.rules in Codex's rules folder) or its sandbox wants one, and asks
+# this hook first: allow, deny, or no verdict (then the person at the keyboard). A hook that cannot start gives no
+# verdict, which is the backstop for openai/codex#45293. When the hook does start, the licence has already answered
+# this exact call at PreToolUse; an allow there leaves a marker and the PermissionRequest answers from it, so nobody
+# is asked twice. No marker = no verdict: never weaker than Codex alone. Codex's PermissionRequest carries no
+# tool_use_id, so the marker is keyed on what both events carry: session, turn, tool, and the exact input (the
+# command for a shell call; Codex builds both from the same string).
+PERMISSION_REQUEST_HARNESSES = {"codex"}
+PREAUTH_TTL_SEC = 300
+
+
+def _preauth_key(data: dict, tool_input) -> str | None:
+    import hashlib
+    sid, tool = str(data.get("session_id") or ""), str(data.get("tool_name") or "")
+    if not sid or not tool:
+        return None
+    ti = tool_input if isinstance(tool_input, dict) else {}
+    if "command" in ti:
+        body = str(ti.get("command") or "")
+    else:   # the PermissionRequest adds a description; it is not part of the action
+        body = json.dumps({k: v for k, v in ti.items() if k != "description"}, sort_keys=True, default=str)
+    return hashlib.sha256(json.dumps([HARNESS, sid, str(data.get("turn_id") or ""), tool, body]).encode()).hexdigest()
+
+
+def preauth_mark(data: dict, tool_input, why: str) -> None:
+    """Leave the marker for an action the licence allowed. Bookkeeping: never fails the allow."""
+    if HARNESS not in PERMISSION_REQUEST_HARNESSES:
+        return
+    key = _preauth_key(data, tool_input)
+    if not key:
+        return
+    try:
+        d = STATE_DIR / "preauth"
+        d.mkdir(parents=True, exist_ok=True)
+        os.chmod(d, 0o700)
+        now = time.time()
+        for old in d.glob("*.json"):
+            try:
+                if now - old.stat().st_mtime > PREAUTH_TTL_SEC:
+                    old.unlink()
+            except OSError:
+                pass
+        fd = os.open(d / f"{key}.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump({"at": now, "why": str(why)[:200]}, f)
+    except OSError:
+        pass
+
+
+def preauth_found(data: dict) -> dict | None:
+    key = _preauth_key(data, data.get("tool_input"))
+    if not key:
+        return None
+    try:
+        doc = json.loads((STATE_DIR / "preauth" / f"{key}.json").read_text()) or {}
+        return doc if time.time() - float(doc.get("at") or 0) <= PREAUTH_TTL_SEC else None
+    except (OSError, ValueError):
+        return None
+
+
+def on_permission_request(data: dict) -> None:
+    """Codex's approval question. Allow only what the licence allowed at PreToolUse for this exact call; deny a
+    gate-critical command outright, as PreToolUse would; otherwise give no verdict, so Codex asks a person."""
+    tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    cmd = str(tool_input.get("command") or "")
+    if cmd:
+        _scr = bash_screen()
+        if _scr.search(cmd) or _scr.search(_deobfuscate(cmd)):
+            emit("PermissionRequest", {"decision": {"behavior": "deny", "message": "xchk: command references gate-critical paths or gate env vars - no grant authorizes this"}})
+            sys.exit(0)
+    if preauth_found(data):
+        emit("PermissionRequest", {"decision": {"behavior": "allow"}})
+    sys.exit(0)
 
 # DYNAMIC COST ALLOCATION (12 Sep 2026, Sean: "/cost dev, /cost research … used programmatically").
 # `xchk cost <code> [workspace]` typed in a session charges everything the session does FROM NOW:
@@ -1521,6 +1601,7 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
     start_act_reading(cfg, client, session_id, auth, summary or tool_name)
     if auth.get("disposition") == "allow":
         _record(auth.get("authRef"), mapped, summary or tool_name, client, auth.get("paramsHash"))
+        preauth_mark(data, tool_input, f"allowed under {run_ref}")
         decide("allow", f"xchk: allowed under {run_ref} (area {area})")
     if auth.get("disposition") == "forbid":
         decide("deny", f"xchk: forbidden by license grant (area {area}): {auth.get('reason') or 'forbid'}")
@@ -1573,8 +1654,10 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
             amended_cmd = updated.get("command", "")
             _record(auth.get("authRef"), mapped, f"amended by {amend.get('byEmail') or approver}: {amended_cmd[:300]}", client,
                     _ah.sha256(amended_cmd.encode("utf-8")).hexdigest())
+            preauth_mark(data, updated, f"approved with changes, attestation {att_id}")
             decide("allow", f"xchk: approved WITH CHANGES by {amend.get('byEmail') or approver} — running the amended command (attestation {att_id}, area {amend.get('area') or area}, {run_ref})", updated)
         _record(auth.get("authRef"), mapped, summary or tool_name, client, auth.get("paramsHash"))
+        preauth_mark(data, tool_input, f"approved, attestation {att_id}")
         decide("allow", f"xchk: approved by {approver} (attestation {att_id}, area {area}, {run_ref})")
     if result.get("status") == "declined":
         decide("deny", f"xchk: DENIED by {approver} (attestation {att_id})")
@@ -1644,6 +1727,8 @@ def main() -> None:
             on_heartbeat(data, client)
         elif event == "SessionEnd":
             on_session_end(data, client)
+        elif event == "PermissionRequest":
+            on_permission_request(data)
     except SystemExit:
         raise
     except Exception as e:  # never crash the harness; honor fail-closed for gated tools
