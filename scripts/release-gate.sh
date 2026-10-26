@@ -170,24 +170,45 @@ for h in ${XCHK_DEPLOY_HOSTS:-in.xchk.io xchk.me}; do
 done
 
 # ---------- 7. install to live ----------
+# EVERY HARNESS COPY (26 Oct 2026). Each harness installer lays down its own copy of the one gate beside this one
+# (<xchk home>/<harness>-plugin: codex, cursor, copilot, antigravity), and this step used to refresh only $LIVE. Codex
+# went on running the old gate after 0.1.31 shipped the fix meant for it, until Sean copied the hook in by hand. The
+# same install now runs for $LIVE and for every other *-plugin folder beside it that already holds a gate: same files,
+# same backups, same byte check. A harness that is not installed has no folder, so nothing is created for it.
+install_copy() {
+  local dir="$1"
+  cp "$dir/hooks/xchk_hook.py" "$dir/hooks/xchk_hook.py.bak.release.$STAMP"
+  [[ -f "$dir/xchk_client.py" ]] && cp "$dir/xchk_client.py" "$dir/xchk_client.py.bak.release.$STAMP"
+  cp "$SRC/hooks/xchk_hook.py"  "$dir/hooks/xchk_hook.py"
+  cp "$SRC/xchk_client.py"      "$dir/xchk_client.py"
+  local man; man="$(ls "$dir" | grep -i '^MANIFEST' | grep -v '\.bak\.' | head -1 || true)"
+  if [[ -n "$man" ]]; then
+    cp "$dir/$man" "$dir/$man.bak.release.$STAMP"
+    cp "$PLUG/MANIFEST.standalone.sha256" "$dir/$man"
+    ok "$dir: manifest ($man) replaced with the published standalone manifest"
+  else
+    echo "   ! no MANIFEST* file in $dir — the gate would report 'unmanifested'. Copying the standalone manifest as MANIFEST.sha256."
+    cp "$PLUG/MANIFEST.standalone.sha256" "$dir/MANIFEST.sha256"
+  fi
+  rm -rf "$dir/__pycache__" "$dir/hooks/__pycache__"
+  [[ "$(sha "$dir/hooks/xchk_hook.py")" == "$HOOK_SHA" ]] || die "$dir: hook != source after install"
+  [[ "$(sha "$dir/xchk_client.py")" == "$CLI_SHA" ]]      || die "$dir: client != source after install"
+  ok "$dir: hook/client are byte-identical to the released source"
+}
+
 say "7. install to LIVE gate ($LIVE)"
-cp "$LIVE/hooks/xchk_hook.py" "$LIVE/hooks/xchk_hook.py.bak.release.$STAMP"
-cp "$LIVE/xchk_client.py"     "$LIVE/xchk_client.py.bak.release.$STAMP"
-cp "$SRC/hooks/xchk_hook.py"  "$LIVE/hooks/xchk_hook.py"
-cp "$SRC/xchk_client.py"      "$LIVE/xchk_client.py"
-LIVE_MAN="$(ls "$LIVE" | grep -i '^MANIFEST' | head -1 || true)"
-if [[ -n "$LIVE_MAN" ]]; then
-  cp "$LIVE/$LIVE_MAN" "$LIVE/$LIVE_MAN.bak.release.$STAMP"
-  cp "$PLUG/MANIFEST.standalone.sha256" "$LIVE/$LIVE_MAN"
-  ok "live manifest ($LIVE_MAN) replaced with the published standalone manifest"
-else
-  echo "   ! no MANIFEST* file in $LIVE — the gate will report 'unmanifested'. Copying standalone manifest as MANIFEST.sha256 (tell Claude if the hook expects another name)."
-  cp "$PLUG/MANIFEST.standalone.sha256" "$LIVE/MANIFEST.sha256"
-fi
-rm -rf "$LIVE/__pycache__" "$LIVE/hooks/__pycache__"
-[[ "$(sha "$LIVE/hooks/xchk_hook.py")" == "$HOOK_SHA" ]] || die "live hook != source after install"
-[[ "$(sha "$LIVE/xchk_client.py")" == "$CLI_SHA" ]]      || die "live client != source after install"
-ok "live hook/client are byte-identical to the released source"
+install_copy "$LIVE"
+
+say "7b. install to every other harness copy beside it"
+OTHERS=0
+for dir in "$(dirname "$LIVE")"/*-plugin; do
+  [[ -d "$dir" && "$dir" != "$LIVE" && -f "$dir/hooks/xchk_hook.py" ]] || continue
+  install_copy "$dir"; OTHERS=$((OTHERS + 1))
+  if [[ "$(basename "$dir")" == "codex-plugin" ]]; then
+    echo "   ! Codex trusts a hook by its hash: open Codex, run /hooks, trust the xchk entry, restart Codex."
+  fi
+done
+if [[ $OTHERS -gt 0 ]]; then ok "$OTHERS other harness copy(ies) refreshed"; else ok "no other harness copies on this host"; fi
 
 say "RELEASED v$NEW_VER"
 echo "   The gate's next status ping should report gateIntegrity=verified and the"
