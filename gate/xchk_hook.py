@@ -85,7 +85,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None):
         except Exception:
             pass
 
-PLUGIN_VERSION = "0.1.30"
+PLUGIN_VERSION = "0.1.31"
 MAX_STDIN_BYTES = 512 * 1024
 
 
@@ -854,6 +854,13 @@ def emit(event: str, extra: dict) -> None:
 
 
 def decide(decision: str, reason: str, updated_input: dict | None = None) -> None:
+    # CODEX TAKES SILENCE FOR ALLOW (25 Oct 2026; Sean: "stops Codex showing Hook failed on an allow"). Codex's
+    # PreToolUse accepts deny, and allow only with updatedInput; a plain allow is "unsupported permissionDecision:allow",
+    # shown as "Hook failed" and then ignored (codex-rs/hooks/src/events/pre_tool_use.rs). Exit 0 with no output is
+    # Codex's own "no decision": the call goes on through its rules and the PermissionRequest answer, exactly as the
+    # ignored allow did. Deny and allow-with-updatedInput (amendments, `xchk cost`) are printed as before.
+    if HARNESS == "codex" and decision == "allow" and updated_input is None:
+        sys.exit(0)
     out = {"permissionDecision": decision, "permissionDecisionReason": reason[:500]}
     if updated_input is not None:
         # APPROVE WITH CHANGES: what runs is the amended input, not the
