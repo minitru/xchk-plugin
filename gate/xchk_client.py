@@ -233,7 +233,9 @@ class XchkClient:
         if tool_name:
             body["tool"] = tool_name
         if action_summary:
-            body["actionSummary"] = action_summary[:500]
+            # 5 Nov 2026: the whole command or diff, not its opening — the gate bounds it (HOLD_PAYLOAD_CHARS) and the
+            # registry clamps at the same figure (agentGovernanceService.buildAgentGovernanceFields).
+            body["actionSummary"] = action_summary[:16000]
         if args:
             if tool_name == "terminal" and args.get("command"):
                 body["command"] = normalize_terminal_command(str(args.get("command")))[:500]

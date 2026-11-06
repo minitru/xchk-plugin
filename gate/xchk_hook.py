@@ -85,7 +85,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None):
         except Exception:
             pass
 
-PLUGIN_VERSION = "0.1.31"
+PLUGIN_VERSION = "0.1.32"
 MAX_STDIN_BYTES = 512 * 1024
 
 
@@ -203,9 +203,11 @@ INTERNAL_PATH_RE = re.compile(r"/\.cursor/projects/[^/]+/agent-tools/")
 # disposition "allow" on the files or terminal area, one Write to
 # ~/.xchk/claude.json (or an `echo XCHK_FAIL_CLOSED=0 >> ~/.zshrc`) silently
 # disarms or redirects the gate at the next session start. Gate-critical paths
-# are therefore hard-denied BEFORE grant evaluation — no grant, no approver,
-# and no fail-open setting authorizes the agent to touch them. Changing them
-# is done from a shell the agent does not drive.
+# are therefore caught BEFORE grant evaluation — no grant and no fail-open
+# setting authorizes the agent to touch them. Until 5 Nov 2026 they were
+# refused outright; since then they are HELD for the licence's approver — the
+# owner, answering the exact edit with a passkey — and refused without that
+# answer (Sean, 5 Nov 2026: "Yes, phone approval"; see "Owner holds").
 
 SHELL_INIT_NAMES = (
     ".zshrc", ".zshenv", ".zprofile", ".zlogin",
@@ -357,6 +359,178 @@ def _deobfuscate(command: str) -> str:
         if dec.isprintable():
             shadow.append(dec)
     return " ".join(shadow)
+
+
+# ── Owner holds (5 Nov 2026) ──────────────────────────────────────────────────
+# Sean, 5 Nov 2026 ("Yes, phone approval"): three kinds of action are HELD for the licence's approver — the owner,
+# on their phone, answering with a passkey — instead of passing, and instead of the outright refusal self-protection
+# used to give:
+#   1. a command the agent itself marks as needing its owner (`… # xchk: hold`). "If we're instructed to notify the
+#      owner, we should use xchk for the notification vs inline in claude": a note in the chat is not the owner's
+#      approval; the answer on the card is, and it is sealed on the plate's record.
+#   2. an outside send: an HTTP client (curl, wget, httpie, a requests/fetch/urlopen call in a script) with a body
+#      or a sending method to a host that is not loopback — and ALWAYS one whose text names the owner as the
+#      authorizer (the 5 Nov POST to OTIS Labs said authorized_by Sean and went through with no card). The licence
+#      has no host allow list yet, so loopback is the only "inside".
+#   3. an action touching a gate-critical path (gate code, hook registration, ~/.xchk, shell init, XCHK_*): one
+#      edit per approval, the whole command or diff on the card, encoded spellings expanded first.
+# A hold travels the existing attestation path: authorize with `escalate` (the registry turns its allow into a hold,
+# code hook_escalation), an attestation for the approver, the poll. It NEVER passes on its own: no licence, no
+# approver, an unreachable registry, a refused attestation or an unanswered card all refuse, fail-open setting or not.
+OWNER_HOLD_RE = re.compile(r"#\s*xchk:?\s+hold\b", re.IGNORECASE)
+HOLD_PAYLOAD_CHARS = 16000      # the card shows the whole command or diff; past this it says how much is missing
+_OWNER_NAMED_RE = re.compile(r"authori[sz]ed[_ -]?by|on[_ ]behalf[_ ]of|approved[_ -]?by", re.IGNORECASE)
+_HTTP_CLIENTS = {"curl", "wget", "http", "https", "xh", "httpie"}
+_CURL_BODY_FLAGS = ("--data", "--json", "--form", "--upload-file")          # prefixes: --data-raw, --data-binary, …
+_CURL_VALUE_SHORT = "HouAbcemwxEKrCDUPQtyYz"                                 # short flags that take the next argument
+_WGET_BODY_FLAGS = ("--post-data", "--post-file", "--body-data", "--body-file")
+_WGET_VALUE_SHORT = "OoPUTtwiBeaAlRDIXQ"
+_SENDING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+_LOOPBACK_RE = re.compile(r"^(localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|::1|\[::1\]|[^/]*\.localhost)$", re.IGNORECASE)
+_SCRIPT_SEND_RE = re.compile(
+    r"requests\.(post|put|patch|delete)\s*\(|method\s*[:=]\s*['\"](POST|PUT|PATCH|DELETE)['\"]"
+    r"|urlopen\([^)]*\bdata\s*=|\.request\(\s*['\"](POST|PUT|PATCH|DELETE)['\"]", re.IGNORECASE)
+
+
+def _url_host(arg: str):
+    """Host of a URL argument, or None when the argument does not read as one. curl accepts a bare host[:port]/path,
+    so a bare word counts only when it looks like a host (a dot, or localhost, or a bracketed address)."""
+    a = str(arg or "").strip().strip("'\"")
+    m = re.match(r"^(?:[a-z][a-z0-9+.\-]*://)?(?:[^/@\s]+@)?(\[[0-9a-f:.]+\]|[^/\s:@?#]+)(?::\d+)?(?:[/?#]|$)", a, re.IGNORECASE)
+    if not m:
+        return None
+    host = m.group(1)
+    if "://" not in a and "." not in host and host.lower() != "localhost" and not host.startswith("["):
+        return None
+    return host
+
+
+def _split_argv(seg: str) -> list:
+    try:
+        argv = _xk_shlex.split(seg)
+    except ValueError:
+        argv = seg.split()
+    while argv and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", argv[0]) or argv[0] in ("sudo", "time", "nohup", "env", "command")):
+        argv = argv[1:]
+    return argv
+
+
+def classify_outside_send(command_text: str):
+    """Why a shell command is an outside send, or None. Segment by segment, like classify_destructive_fs: the head
+    names the client, its arguments say whether a body or a sending method goes with it, the URL says where. A send
+    whose destination cannot be read (a URL held in a variable) counts as outside: fail-safe. Not a parser of every
+    client — the card shows the whole command, and the owner reads it."""
+    text = command_text or ""
+    whole = _split_argv(text)
+    if whole and os.path.basename(whole[0]) not in _HTTP_CLIENTS and _SCRIPT_SEND_RE.search(text):
+        return ("outside send naming the owner as authorizer" if _OWNER_NAMED_RE.search(text) else "outside send") + \
+            f": an HTTP send from a script ({os.path.basename(whole[0])})"
+    for seg in _xk_re.split(r"(?:\|\||&&|;|\||\n)", text):
+        seg = seg.strip()
+        if not seg:
+            continue
+        argv = _split_argv(seg)
+        if not argv:
+            continue
+        head = os.path.basename(argv[0])
+        owner_named = bool(_OWNER_NAMED_RE.search(seg))
+        if head not in _HTTP_CLIENTS:
+            continue
+        rest, body, method, host = argv[1:], False, "GET", None
+        i = 0
+        while i < len(rest):
+            a = rest[i]
+            consumed = 0
+            if head == "curl":
+                if a.startswith(_CURL_BODY_FLAGS) or a in ("-d", "-F", "-T"):
+                    body = True
+                    consumed = 0 if "=" in a else 1
+                elif a in ("-X", "--request"):
+                    method = (rest[i + 1] if i + 1 < len(rest) else "?").upper(); consumed = 1
+                elif a.startswith("--request="):
+                    method = a.split("=", 1)[1].upper()
+                elif re.match(r"^-[A-Za-z]+$", a):
+                    letters = a[1:]
+                    if any(c in letters for c in "dFT"):
+                        body = True
+                    if "X" in letters:
+                        tail = letters[letters.index("X") + 1:]
+                        if tail:
+                            method = tail.upper()
+                        else:
+                            method = (rest[i + 1] if i + 1 < len(rest) else "?").upper(); consumed = 1
+                    elif letters[-1] in _CURL_VALUE_SHORT or any(c in letters for c in "dFT"):
+                        consumed = 1
+                elif a.startswith("--") and "=" not in a and a in ("--header", "--output", "--user", "--user-agent", "--cookie",
+                                                                       "--referer", "--max-time", "--write-out", "--proxy",
+                                                                       "--cert", "--key", "--cacert", "--config", "--retry",
+                                                                       "--connect-timeout", "--unix-socket", "--resolve"):
+                    consumed = 1
+                elif not a.startswith("-") and host is None:
+                    host = _url_host(a)
+            elif head == "wget":
+                if a.startswith(_WGET_BODY_FLAGS):
+                    body = True
+                    consumed = 0 if "=" in a else 1
+                elif a.startswith("--method="):
+                    method = a.split("=", 1)[1].upper()
+                elif a == "--method":
+                    method = (rest[i + 1] if i + 1 < len(rest) else "?").upper(); consumed = 1
+                elif re.match(r"^-[A-Za-z]$", a) and a[1] in _WGET_VALUE_SHORT:
+                    consumed = 1
+                elif a.startswith("--header") and "=" not in a:
+                    consumed = 1
+                elif not a.startswith("-") and host is None:
+                    host = _url_host(a)
+            else:   # httpie family: [METHOD] URL [item=value | item:=json | field@file …]
+                if a.startswith("-"):
+                    pass
+                elif host is None and method == "GET" and re.fullmatch(r"[A-Z]+", a):
+                    method = a
+                elif host is None:
+                    host = _url_host(a) or "?"
+                elif re.search(r"(?<!:)[=@]|:=", a):
+                    body = True
+            i += 1 + consumed
+        if body and method == "GET":
+            method = "POST"
+        if not (body or method in _SENDING_METHODS):
+            continue
+        if host and host != "?" and _LOOPBACK_RE.match(host) and not owner_named:
+            continue
+        where = host if host and host != "?" else "a host the gate cannot read from the command"
+        return ("outside send naming the owner as authorizer" if owner_named else "outside send") + \
+            f": {head} {method} to {where}" + (" with a body" if body else "")
+    return None
+
+
+def hold_payload(tool_name: str, tool_input: dict, decoded: str = "") -> str:
+    """What the approver is shown: the whole command or the whole edit, not the opening of it (5 Nov 2026, design
+    item 4). Bounded at HOLD_PAYLOAD_CHARS with the shortfall stated — never cut silently."""
+    ti = tool_input if isinstance(tool_input, dict) else {}
+    path = str(ti.get("file_path") or ti.get("notebook_path") or "")
+    if tool_name == "Bash" or TOOL_MAP.get(tool_name) == "terminal":
+        text = str(ti.get("command") or "")
+        if decoded:
+            text += f"\n\n[decoded from an encoded spelling inside the command]\n{decoded}"
+    elif tool_name == "Write":
+        text = f"Write {path}\n{ti.get('content') if ti.get('content') is not None else ti.get('CodeContent', '')}"
+    elif tool_name == "Edit" and ("old_string" in ti or "new_string" in ti):
+        text = (f"Edit {path}{' (replace all)' if ti.get('replace_all') else ''}\n"
+                f"--- old\n{ti.get('old_string', '')}\n+++ new\n{ti.get('new_string', '')}")
+    elif tool_name == "MultiEdit" and isinstance(ti.get("edits"), list):
+        text = f"MultiEdit {path}\n" + "\n".join(
+            f"--- old\n{e.get('old_string', '')}\n+++ new\n{e.get('new_string', '')}" for e in ti["edits"] if isinstance(e, dict))
+    elif tool_name == "NotebookEdit":
+        text = f"NotebookEdit {path} cell {ti.get('cell_id') or ''}\n{ti.get('new_source') or ''}"
+    else:
+        try:
+            text = f"{tool_name} {path}\n{json.dumps(ti, default=str, indent=1)}"
+        except (TypeError, ValueError):
+            text = f"{tool_name} {path}\n{ti}"
+    if len(text) > HOLD_PAYLOAD_CHARS:
+        text = text[:HOLD_PAYLOAD_CHARS] + f"\n… [{len(text) - HOLD_PAYLOAD_CHARS} more characters not shown]"
+    return text
 
 
 # Wire name -> display name. The wire name keys the install slot, so a harness
@@ -954,17 +1128,20 @@ def preauth_found(data: dict) -> dict | None:
 
 
 def on_permission_request(data: dict) -> None:
-    """Codex's approval question. Allow only what the licence allowed at PreToolUse for this exact call; deny a
-    gate-critical command outright, as PreToolUse would; otherwise give no verdict, so Codex asks a person."""
+    """Codex's approval question. Allow only what the licence allowed at PreToolUse for this exact call — since
+    5 Nov 2026 that includes a gate-critical command the owner approved on the card, which leaves the same marker;
+    deny a gate-critical command with no such marker, as PreToolUse would; otherwise give no verdict, so Codex asks a
+    person."""
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    if preauth_found(data):
+        emit("PermissionRequest", {"decision": {"behavior": "allow"}})
+        sys.exit(0)
     cmd = str(tool_input.get("command") or "")
     if cmd:
         _scr = bash_screen()
         if _scr.search(cmd) or _scr.search(_deobfuscate(cmd)):
-            emit("PermissionRequest", {"decision": {"behavior": "deny", "message": "xchk: command references gate-critical paths or gate env vars - no grant authorizes this"}})
+            emit("PermissionRequest", {"decision": {"behavior": "deny", "message": "xchk: command references gate-critical paths or gate env vars - held for the owner at PreToolUse, and not approved there"}})
             sys.exit(0)
-    if preauth_found(data):
-        emit("PermissionRequest", {"decision": {"behavior": "allow"}})
     sys.exit(0)
 
 # DYNAMIC COST ALLOCATION (12 Sep 2026, Sean: "/cost dev, /cost research … used programmatically").
@@ -1493,16 +1670,28 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
 
     target = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
 
-    # Gate self-protection: hard deny BEFORE any grant is consulted, and
-    # before the configured/fail-open branch — an unlicensed dev box still
-    # refuses to let the agent rewrite the gate. See "Gate self-protection".
+    # Gate self-protection, computed BEFORE any grant is consulted and before the configured/fail-open branch. Since
+    # 5 Nov 2026 a gate-critical action is HELD for the owner rather than refused outright (see "Owner holds"): an
+    # unlicensed dev box, a box with no approver, or an unreachable registry still refuses to let the agent rewrite
+    # the gate; a licensed one asks the owner, one edit per card, the whole edit shown.
+    hold, decoded = None, ""
     if mapped in ("write_file", "patch") and is_protected_path(target):
-        decide("deny", f"xchk: '{target}' is gate-critical (gate code/config, hook registration, or shell init) — no grant authorizes modifying the gate")
+        hold = f"'{target}' is gate-critical (gate code/config, hook registration, or shell init)"
     if mapped == "terminal":
         _cmd = str(tool_input.get("command") or "")
         _scr = bash_screen()
-        if _scr.search(_cmd) or _scr.search(_deobfuscate(_cmd)):
-            decide("deny", "xchk: command references gate-critical paths or gate env vars (~/.xchk, gate code, hook registration, shell init, XCHK_*) — no grant authorizes this; run it from a shell the agent does not drive. Encoded spellings (base64, hex) are expanded before screening.")
+        if _scr.search(_cmd):
+            hold = "command references gate-critical paths or gate env vars (~/.xchk, gate code, hook registration, shell init, XCHK_*)"
+        else:
+            decoded = _deobfuscate(_cmd)
+            if _scr.search(decoded):
+                hold = "command references gate-critical paths or gate env vars in an ENCODED spelling (base64/hex), expanded before screening"
+            else:
+                decoded = ""
+        if not hold and OWNER_HOLD_RE.search(_cmd):
+            hold = "the agent asked for its owner's approval (# xchk: hold)"
+        if not hold:
+            hold = classify_outside_send(_cmd)
     if mapped == "read_file" and target:
         t = _resolve(target)
         if any(t == r or r in t.parents
@@ -1513,6 +1702,9 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
         sys.exit(0)  # harness's own scratch — see INTERNAL_PATH_RE
 
     if not client.configured:
+        if hold:
+            # No licence means no owner to ask: the hold refuses, fail-open setting or not. Never a pass.
+            decide("deny", f"xchk: {hold} — held for the owner's approval, but no licence is configured here and nobody can be asked; refusing")
         if cfg["fail_closed"]:
             decide("deny", "xchk: license client not configured — failing closed (set XCHK_FAIL_CLOSED=0 to degrade open)")
         sys.exit(0)
@@ -1576,7 +1768,9 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
     label_note = f" [{', '.join(l['label'] for l in labels)}]" if labels else ""
 
     summary = summarize(tool_name, tool_input)
-    auth = client.authorize(mapped, args, telemetry=model_telemetry(data), escalate=_xk_escalate(mapped, args, data), prompt=f"{HARNESS_LABEL} {tool_name}", danger_desc=summary,
+    # A hold rides `escalate`: the registry turns its allow into a hold for a person and seals the reason.
+    escalate = hold or _xk_escalate(mapped, args, data)
+    auth = client.authorize(mapped, args, telemetry=model_telemetry(data), escalate=escalate, prompt=f"{HARNESS_LABEL} {tool_name}", danger_desc=summary,
                             run_ticket=ticket, action_area=area_hint,
                             delegation_chain=chain, labels=labels, tags=_cost_current(session_id))
 
@@ -1591,11 +1785,14 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
         # including the delegation edge, which names the NEW run as parent.
         run_ref = (run or {}).get("runRef") or run_ref
         chain = parent_chain(run) if mapped == "spawn_agent" else None
-        auth = client.authorize(mapped, args, telemetry=model_telemetry(data), escalate=_xk_escalate(mapped, args, data), prompt=f"{HARNESS_LABEL} {tool_name}", danger_desc=summary,
+        auth = client.authorize(mapped, args, telemetry=model_telemetry(data), escalate=escalate, prompt=f"{HARNESS_LABEL} {tool_name}", danger_desc=summary,
                                 run_ticket=ticket, action_area=area_hint,
                                 delegation_chain=chain, labels=labels, tags=_cost_current(session_id))
 
     if auth.get("skip"):
+        if hold:
+            # The owner cannot be asked when the registry cannot be reached: the hold refuses, fail-open or not.
+            decide("deny", f"xchk: {hold} — held for the owner's approval, but the registry cannot be reached ({auth.get('reason')}); refusing")
         if cfg["fail_closed"]:
             decide("deny", f"xchk: license server unavailable ({auth.get('reason')}) — failing closed")
         sys.exit(0)
@@ -1605,6 +1802,11 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
     auth = _lockdown_guard(auth, cfg, client)
 
     area = auth.get("area") or "?"
+    if hold and auth.get("disposition") == "allow":
+        # The registry answered allow to an escalation (a registry that predates hook_escalation, or one that was
+        # told to ignore it): the host holds anyway. One direction only — allow becomes a hold, never wider — and the
+        # record keeps the registry's word (authorizeDisposition) beside the host's reason.
+        auth = {**auth, "disposition": "attest", "code": "hook_escalation", "reason": hold}
     start_act_reading(cfg, client, session_id, auth, summary or tool_name)
     if auth.get("disposition") == "allow":
         _record(auth.get("authRef"), mapped, summary or tool_name, client, auth.get("paramsHash"))
@@ -1628,14 +1830,15 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
         # and name the fix, rather than launder a self-approval as an
         # attestation. (Unlicensed sessions never reach this branch —
         # authorize has already succeeded.)
-        decide("deny", f"xchk: area {area} requires attestation but this licence has no approver configured — denying rather than self-approving. Fix: set an approver on the licence so approvals route to an independent human.")
+        decide("deny", f"xchk: area {area} requires attestation but this licence has no approver configured — denying rather than self-approving{' (' + hold + ')' if hold else ''}. Fix: set an approver on the licence so approvals route to an independent human.")
 
+    held_note = f" — HELD FOR THE OWNER: {hold}" if hold else ""
     att_id, err = client.create_attestation(
-        prompt=f"{run_ref} (via {HARNESS_LABEL}) wants to {summary or tool_name}{label_note}",
+        prompt=f"{run_ref} (via {HARNESS_LABEL}) wants to {summary or tool_name}{label_note}{held_note}",
         target_email=approver,
         tool_name=mapped,
         args=args,
-        action_summary=summary,
+        action_summary=hold_payload(tool_name, tool_input, decoded),   # the whole command or edit, not its opening (5 Nov 2026)
         auth=auth,
         delegation_chain=chain,
         ttl=int(cfg["attest_timeout"]),
@@ -1665,7 +1868,7 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
             decide("allow", f"xchk: approved WITH CHANGES by {amend.get('byEmail') or approver} — running the amended command (attestation {att_id}, area {amend.get('area') or area}, {run_ref})", updated)
         _record(auth.get("authRef"), mapped, summary or tool_name, client, auth.get("paramsHash"))
         preauth_mark(data, tool_input, f"approved, attestation {att_id}")
-        decide("allow", f"xchk: approved by {approver} (attestation {att_id}, area {area}, {run_ref})")
+        decide("allow", f"xchk: approved by {approver} (attestation {att_id}, area {area}, {run_ref}){held_note}")
     if result.get("status") == "declined":
         decide("deny", f"xchk: DENIED by {approver} (attestation {att_id})")
     decide("deny", f"xchk: approval {result.get('status') or 'failed'} (attestation {att_id}) — not executing")
