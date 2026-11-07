@@ -85,7 +85,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None):
         except Exception:
             pass
 
-PLUGIN_VERSION = "0.1.32"
+PLUGIN_VERSION = "0.1.33"
 MAX_STDIN_BYTES = 512 * 1024
 
 
@@ -1768,11 +1768,14 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
     label_note = f" [{', '.join(l['label'] for l in labels)}]" if labels else ""
 
     summary = summarize(tool_name, tool_input)
+    # The agent's own stated reason, when the harness carries one (Claude Code's Bash `description`; 6 Nov 2026).
+    # Sent as a claim for the sealed record, never read by the gate: the decision does not depend on it.
+    rationale = str(tool_input.get("description") or "").strip()[:300] if isinstance(tool_input, dict) else ""
     # A hold rides `escalate`: the registry turns its allow into a hold for a person and seals the reason.
     escalate = hold or _xk_escalate(mapped, args, data)
     auth = client.authorize(mapped, args, telemetry=model_telemetry(data), escalate=escalate, prompt=f"{HARNESS_LABEL} {tool_name}", danger_desc=summary,
                             run_ticket=ticket, action_area=area_hint,
-                            delegation_chain=chain, labels=labels, tags=_cost_current(session_id))
+                            delegation_chain=chain, labels=labels, tags=_cost_current(session_id), rationale=rationale)
 
     # Renew, don't refuse: an aged-out ticket on a live plate means only the
     # clock ran out, so re-dispatch for THIS session and carry on. A wrong or
@@ -1787,7 +1790,7 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
         chain = parent_chain(run) if mapped == "spawn_agent" else None
         auth = client.authorize(mapped, args, telemetry=model_telemetry(data), escalate=escalate, prompt=f"{HARNESS_LABEL} {tool_name}", danger_desc=summary,
                                 run_ticket=ticket, action_area=area_hint,
-                                delegation_chain=chain, labels=labels, tags=_cost_current(session_id))
+                                delegation_chain=chain, labels=labels, tags=_cost_current(session_id), rationale=rationale)
 
     if auth.get("skip"):
         if hold:

@@ -105,6 +105,7 @@ class XchkClient:
         telemetry: Optional[dict] = None,
         escalate: Optional[str] = None,
         tags: Optional[dict] = None,
+        rationale: Optional[str] = None,
     ) -> Dict[str, Any]:
         """POST /api/agents/authorize. Returns disposition or skip for legacy keys."""
         if not self.configured:
@@ -138,6 +139,9 @@ class XchkClient:
             body.update(telemetry)
         if escalate:
             body["escalate"] = escalate
+        # The agent's stated reason for the act, sealed on the record as its claim (6 Nov 2026). Only when given.
+        if rationale:
+            body["rationale"] = str(rationale)[:300]
         # Dynamic cost allocation: the session's charge code at this moment, sealed on the record.
         if tags and tags.get("code"):
             body["tags"] = {"chargeCode": tags.get("code"), **({"workspace": tags["workspace"]} if tags.get("workspace") else {})}
