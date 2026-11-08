@@ -4,3 +4,8 @@ __pycache__/
 # patch-script backups never ship in a release (27 Sep 2026)
 *.bak-*
 *.bak.*
+
+# runtime state and local harness settings never ship (7 Nov 2026)
+local-chain.json
+local-chain.json.lock
+.claude/settings.local.json
