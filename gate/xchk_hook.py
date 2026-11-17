@@ -85,8 +85,11 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None):
         except Exception:
             pass
 
-PLUGIN_VERSION = "0.1.33"
-MAX_STDIN_BYTES = 512 * 1024
+PLUGIN_VERSION = "0.1.34"
+# 16 Nov 2026: was 512 KiB, and a payload cut at the cap failed to parse and exited 0, so a Write or a heredoc over
+# 512 KiB ran with no decision at all (payload_mutation_bench.py). The cap stays as a bound on memory; a payload
+# that reaches it is refused unread in main(), never parsed short.
+MAX_STDIN_BYTES = 32 * 1024 * 1024
 
 
 # Written into the manifest header by the install scripts. Its presence means
@@ -1858,6 +1861,14 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
 
     result = client.poll_attestation(att_id, timeout_seconds=cfg["attest_timeout"])
     if result.get("status") == "completed" and result.get("response") in (True, "true", "yes", 1, "approved"):
+        # EXACT-ARGUMENT BINDING (16 Nov 2026): the yes must be for THIS call. The registry returns the digest of the
+        # action the ask was raised for (the digest the passkey signed over); the gate recomputes it from the call it is
+        # holding. Missing, unrecomputable or different: refuse, and run neither the call nor any amendment.
+        from xchk_client import action_params_hash
+        want, got = action_params_hash(mapped, args), result.get("actionParamsHash")
+        if not want or not got or want != got:
+            decide("deny", f"xchk: approved by {approver}, but the approval is not bound to this exact call (attestation {att_id}: "
+                           f"the registry's action digest {str(got)[:12] if got else 'is missing'}, this call's {want[:12] if want else 'cannot be recomputed'}) — not executing")
         amend = result.get("amendment")
         if amend:
             updated, aerr = apply_amendment(mapped, tool_input, amend)
@@ -1915,13 +1926,26 @@ def on_session_end(data: dict, client: XchkClient) -> None:
 
 
 def main() -> None:
-    raw = sys.stdin.buffer.read(MAX_STDIN_BYTES)
-    try:
-        data = json.loads(raw.decode("utf-8", "replace") or "{}")
-    except ValueError:
-        sys.exit(0)
-    if not isinstance(data, dict):
-        sys.exit(0)
+    global HARNESS
+    raw = sys.stdin.buffer.read(MAX_STDIN_BYTES + 1)
+    # FAIL CLOSED ON A PAYLOAD THE GATE CANNOT READ (16 Nov 2026). These paths used to exit 0, which every harness
+    # reads as "no decision" and runs the call: empty or non-JSON stdin, a JSON value that is not an object, and,
+    # the one an agent controls, a payload over the cap, cut short and so unparseable. The event is unknown when the
+    # payload is unreadable, so this refuses in the harness's dialect as the PreToolUse refusal, as the exception
+    # path below does; no harness sends an unreadable payload for its other events.
+    unreadable, data = None, None
+    if len(raw) > MAX_STDIN_BYTES:
+        unreadable = f"payload over {MAX_STDIN_BYTES // (1024 * 1024)} MiB"
+    else:
+        try:
+            data = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError:
+            unreadable = "payload is not JSON" if raw.strip() else "empty payload"
+        if unreadable is None and not isinstance(data, dict):
+            unreadable = "payload is not a JSON object"
+    if unreadable:
+        HARNESS = resolve_harness({})
+        decide("deny", f"xchk: {unreadable}; the gate cannot read this call, so it does not run (failing closed)")
 
     apply_harness(resolve_harness(data), str(data.get("session_id") or data.get("conversationId") or ""))
     if HARNESS == "antigravity":

@@ -35,6 +35,51 @@ def normalize_terminal_command(command: str) -> str:
     return cmd
 
 
+# EXACT-ARGUMENT BINDING (16 Nov 2026). The registry digests the action as the gate asked it (xchk-server
+# agentAuthorizeSessionService.hashActionBinding: JSON.stringify({tool, command, path, amount}) of the body
+# create_attestation sends, each string cut to 500 UTF-16 units and then trimmed, sha256 hex), and the passkey signs
+# over that digest. The gate recomputes it from the call it is holding and refuses an approval whose digest is not this
+# call's. Re-verification, not a second rule: the vectors in tests/test_action_params_hash.py are the server's
+# (xchk-server tests/actionBindingVectors.test.js), and a change on either side fails one of them.
+_JS_WHITESPACE = "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+
+
+def _js_clamp(value, max_units: int = 500):
+    """clampStr: String(value).slice(0, n).trim() || null, with JavaScript's UTF-16 slice and whitespace set."""
+    if value is None or value == "":
+        return None
+    units = str(value).encode("utf-16-le", "surrogatepass")[: 2 * max_units]
+    out = units.decode("utf-16-le", "surrogatepass").strip(_JS_WHITESPACE)
+    return out or None
+
+
+def _js_json_string(value) -> str:
+    """JSON.stringify for a string: as json.dumps without ASCII escaping, plus a lone surrogate written as \\uXXXX."""
+    text = json.dumps(value, ensure_ascii=False)
+    return re.sub(r"[\ud800-\udfff]", lambda m: "\\u%04x" % ord(m.group(0)), text)
+
+
+def action_params_hash(tool_name: Optional[str], args: Optional[dict]) -> Optional[str]:
+    """The digest the registry should have bound to the ask create_attestation raises for (tool_name, args). None when
+    it cannot be recomputed here (a terminal call with no command, a file call with no path: the registry then digs the
+    action out of the summary), which the caller treats as a mismatch."""
+    import hashlib
+    args = args or {}
+    tool = _js_clamp(tool_name, 64)
+    command = path = None
+    if tool_name == "terminal":
+        command = _js_clamp(normalize_terminal_command(str(args.get("command") or ""))[:500])
+        if command is None:
+            return None
+    elif tool_name in ("write_file", "patch", "read_file"):
+        path = _js_clamp(str(args.get("path") or "")[:500])
+        if path is None:
+            return None
+    enc = lambda v: "null" if v is None else _js_json_string(v)  # noqa: E731
+    canonical = '{"tool":%s,"command":%s,"path":%s,"amount":null}' % (enc(tool), enc(command), enc(path))
+    return hashlib.sha256(canonical.encode("utf-8", "surrogatepass")).hexdigest()
+
+
 def _ssl_context() -> ssl.SSLContext:
     try:
         import certifi
@@ -293,6 +338,7 @@ class XchkClient:
             "attestation_id": att_id,
             "sha256": data.get("sha256"),
             "bindingClass": data.get("bindingClass"),
+            "actionParamsHash": data.get("actionParamsHash"),   # 16 Nov 2026: the ask's digest, checked by the gate
         }
         grant = data.get("elevationGrant")
         if grant:
