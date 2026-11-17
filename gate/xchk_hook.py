@@ -65,7 +65,7 @@ def _recorder():
         return None
 
 
-def _record(auth_ref, tool, intent, client=None, params_hash=None):
+def _record(auth_ref, tool, intent, client=None, params_hash=None, run_ref=None):
     """Chain an executed action, then keep the chain CURRENT.
 
     Flushing only at Stop/SessionEnd is not enough: reconciliation grants an
@@ -74,18 +74,21 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None):
     A false alarm discredits the real one, so the flush cadence must stay
     inside the grace — flush() self-rate-limits, this just gives it the
     chance. params_hash binds the entry to the authorized action (content
-    fidelity)."""
+    fidelity). run_ref names the run the segment belongs to: this flush usually
+    sends the entry before Stop's does, and without it 62,395 of 62,404
+    action-bearing segments on in.xchk.io reached the registry with no run
+    (16 Nov 2026)."""
     r = _recorder()
     if not r:
         return
     r.record(auth_ref, tool, intent, params_hash=params_hash)
     if client is not None and getattr(client, "configured", False):
         try:
-            r.flush(client)
+            r.flush(client, run_ref=run_ref)
         except Exception:
             pass
 
-PLUGIN_VERSION = "0.1.34"
+PLUGIN_VERSION = "0.1.35"
 # 16 Nov 2026: was 512 KiB, and a payload cut at the cap failed to parse and exited 0, so a Write or a heredoc over
 # 512 KiB ran with no decision at all (payload_mutation_bench.py). The cap stays as a bound on memory; a payload
 # that reaches it is refused unread in main(), never parsed short.
@@ -1815,7 +1818,8 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
         auth = {**auth, "disposition": "attest", "code": "hook_escalation", "reason": hold}
     start_act_reading(cfg, client, session_id, auth, summary or tool_name)
     if auth.get("disposition") == "allow":
-        _record(auth.get("authRef"), mapped, summary or tool_name, client, auth.get("paramsHash"))
+        _record(auth.get("authRef"), mapped, summary or tool_name, client, auth.get("paramsHash"),
+                run_ref=(run or {}).get("runRef"))
         preauth_mark(data, tool_input, f"allowed under {run_ref}")
         decide("allow", f"xchk: allowed under {run_ref} (area {area})")
     if auth.get("disposition") == "forbid":
@@ -1877,10 +1881,11 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
             import hashlib as _ah
             amended_cmd = updated.get("command", "")
             _record(auth.get("authRef"), mapped, f"amended by {amend.get('byEmail') or approver}: {amended_cmd[:300]}", client,
-                    _ah.sha256(amended_cmd.encode("utf-8")).hexdigest())
+                    _ah.sha256(amended_cmd.encode("utf-8")).hexdigest(), run_ref=(run or {}).get("runRef"))
             preauth_mark(data, updated, f"approved with changes, attestation {att_id}")
             decide("allow", f"xchk: approved WITH CHANGES by {amend.get('byEmail') or approver} — running the amended command (attestation {att_id}, area {amend.get('area') or area}, {run_ref})", updated)
-        _record(auth.get("authRef"), mapped, summary or tool_name, client, auth.get("paramsHash"))
+        _record(auth.get("authRef"), mapped, summary or tool_name, client, auth.get("paramsHash"),
+                run_ref=(run or {}).get("runRef"))
         preauth_mark(data, tool_input, f"approved, attestation {att_id}")
         decide("allow", f"xchk: approved by {approver} (attestation {att_id}, area {area}, {run_ref}){held_note}")
     if result.get("status") == "declined":
