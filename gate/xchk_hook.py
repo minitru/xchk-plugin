@@ -24,7 +24,7 @@ Security posture:
   - Tool input from the model is treated as data: it is JSON-encoded to the
     server, never shell-interpolated, and stdin is size-capped.
   - Fail-closed is the default: gated tools are denied when the license
-    server is unreachable. Set XCHK_FAIL_CLOSED=0 to degrade open on a dev box.
+    server is unreachable. A dev box may degrade open in its config file (fail_closed: "0").
 """
 
 from __future__ import annotations
@@ -41,6 +41,37 @@ from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PLUGIN_ROOT))
+
+
+# ONE GATE PER EVENT (20 Nov 2026). Claude Code can register this gate twice on one machine: the standalone install
+# writes hook entries into ~/.claude/settings.json, and the plugin (xchk@xchk, enabled through Claude's own installer)
+# brings its own hooks.json. The first plugin install, on seanair on 20 Nov 2026, ran beside the standalone entries and
+# the session's one prompt was recorded twice; every tool call would have been authorized and recorded twice. The
+# STANDALONE copy is the fit-out's product (key, config, per-host registration), so it is the one that runs: a copy
+# running from Claude's plugin store steps aside when settings.json registers a standalone copy of the same hook whose
+# file is present. Fail-closed is kept: entries removed, or their files gone, and the plugin copy is the gate again. An
+# unreadable settings file means run. Only Claude Code has the plugin head; no other harness is affected.
+def plugin_head_should_step_aside(script, harness: str) -> bool:
+    if harness != "claude":
+        return False
+    me = Path(script).resolve()
+    if ".claude" not in me.parts or "plugins" not in me.parts:
+        return False                                   # the standalone copy never steps aside
+    try:
+        hooks = (json.loads(Path("~/.claude/settings.json").expanduser().read_text()) or {}).get("hooks")
+    except (OSError, ValueError):
+        return False
+    if not isinstance(hooks, dict):
+        return False
+    for entries in hooks.values():
+        for entry in entries if isinstance(entries, list) else []:
+            for h in (entry.get("hooks") or []) if isinstance(entry, dict) else []:
+                cmd = str((h or {}).get("command") or "") if isinstance(h, dict) else ""
+                for quoted in re.findall(r'"([^"$]+)"', cmd):
+                    other = Path(quoted).expanduser()
+                    if other.name == me.name and other.is_file() and other.resolve() != me:
+                        return True
+    return False
 
 from xchk_client import XchkClient  # noqa: E402
 try:
@@ -88,7 +119,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None, run_ref=None)
         except Exception:
             pass
 
-PLUGIN_VERSION = "0.1.35"
+PLUGIN_VERSION = "0.1.36"
 # 16 Nov 2026: was 512 KiB, and a payload cut at the cap failed to parse and exited 0, so a Write or a heredoc over
 # 512 KiB ran with no decision at all (payload_mutation_bench.py). The cap stays as a bound on memory; a payload
 # that reaches it is refused unread in main(), never parsed short.
@@ -1712,7 +1743,10 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
             # No licence means no owner to ask: the hold refuses, fail-open setting or not. Never a pass.
             decide("deny", f"xchk: {hold} — held for the owner's approval, but no licence is configured here and nobody can be asked; refusing")
         if cfg["fail_closed"]:
-            decide("deny", "xchk: license client not configured — failing closed (set XCHK_FAIL_CLOSED=0 to degrade open)")
+            # No escape hatch in the message (20 Nov 2026): this reason is shown to the AGENT, and it used to name the
+            # environment variable that switches the gate to fail-open. Under a locked install that variable is ignored
+            # (docs/design/LOCKED-INSTALL-2026-11-20.md); under any install the agent is not the one to be told.
+            decide("deny", "xchk: license client not configured — failing closed")
         sys.exit(0)
 
     session_id = data.get("session_id") or ""
@@ -1977,6 +2011,8 @@ def main() -> None:
         if event == "PreToolUse" and cfg.get("fail_closed"):
             decide("deny", f"xchk: hook error ({e.__class__.__name__}) — failing closed")
         sys.exit(0)
+    if plugin_head_should_step_aside(__file__, resolve_harness(data)):
+        sys.exit(0)        # the standalone copy answers this event; see plugin_head_should_step_aside
 
 
 if __name__ == "__main__":

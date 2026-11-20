@@ -62,6 +62,11 @@ def main() -> None:
         return
     try:
         import xchk_hook as gate   # the gate's own config, harness and run-ticket logic
+        # One gate per event (20 Nov 2026): a plugin-store copy steps aside when a standalone copy is registered; the
+        # getattr keeps this hook working beside a gate that predates the function. See plugin_head_should_step_aside.
+        step_aside = getattr(gate, "plugin_head_should_step_aside", None)
+        if step_aside and step_aside(__file__, gate.resolve_harness(data)):
+            return
         gate.apply_harness(gate.resolve_harness(data))
         cfg = gate.load_config()
         client = gate.make_client(cfg)
