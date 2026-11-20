@@ -25,8 +25,18 @@ You need a plate (an agent licence) from a registry, issued to a verified owner:
 
 ## Install
 
-Claude Code: install the plugin from the marketplace or from this repository, then open a plate's **Equipment** page
-in the console and follow the fit-out; the hook adopts an existing `~/.xchk` install and never creates a second one.
+Claude Code: this repository is its own marketplace (`.claude-plugin/marketplace.json`, 20 Nov 2026). In a session,
+one step on Claude Code 2.1.275 or later:
+
+```
+/plugin install xchk --marketplace minitru/xchk-plugin
+```
+
+(or in two: `/plugin marketplace add minitru/xchk-plugin`, then `/plugin install xchk@xchk`; from a shell,
+`claude plugin install xchk --marketplace minitru/xchk-plugin`). Then open a plate's **Equipment** page in the console
+and follow the fit-out; the hook adopts an existing `~/.xchk` install and never creates a second one. Updates:
+auto-update is off for every marketplace that is not Anthropic's, so turn it on under `/plugin` → Marketplaces, or run
+`/plugin marketplace update xchk` after a gate release.
 Releases are signed and manifest-hashed; a registry publishes each release and every installed copy reports its
 version, so a copy that is behind shows up in the owner's console.
 

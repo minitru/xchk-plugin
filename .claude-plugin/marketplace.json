@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "xchk",
+  "description": "xChk: the accountability layer for Claude Code. One plugin, the enforcement-grade gate: every tool call authorized against the agent's plate, recorded to the local dashcam chain, human approval raised where the grant demands it.",
+  "owner": {
+    "name": "Sean Mac Guire",
+    "url": "https://in.xchk.io"
+  },
+  "plugins": [
+    {
+      "name": "xchk",
+      "source": "./",
+      "description": "The xChk gate for Claude Code. Needs a plate (an agent licence) from a registry: start at https://in.xchk.io, then follow the plate's Equipment fit-out. Adopts an existing ~/.xchk install and never creates a second one."
+    }
+  ]
+}
