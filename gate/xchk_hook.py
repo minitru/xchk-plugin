@@ -119,7 +119,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None, run_ref=None)
         except Exception:
             pass
 
-PLUGIN_VERSION = "0.1.36"
+PLUGIN_VERSION = "0.1.37"
 # 16 Nov 2026: was 512 KiB, and a payload cut at the cap failed to parse and exited 0, so a Write or a heredoc over
 # 512 KiB ran with no decision at all (payload_mutation_bench.py). The cap stays as a bound on memory; a payload
 # that reaches it is refused unread in main(), never parsed short.
@@ -1994,6 +1994,11 @@ def main() -> None:
     cfg = load_config()
     client = make_client(cfg)
     event = _EVENTS.get(str(data.get("hook_event_name") or "").lower(), "")
+    # One gate per event (20 Nov 2026, moved here 20 Nov 2026 after 0.1.36 shipped it BELOW the dispatch, where
+    # on_pre_tool_use had already answered and exited: seanair run GEN-T9D0.77 recorded one ls twice). The check must
+    # come before any handler runs; the standalone copy answers this event.
+    if plugin_head_should_step_aside(__file__, resolve_harness(data)):
+        sys.exit(0)
     try:
         if event == "SessionStart":
             on_session_start(data, cfg, client)
@@ -2011,8 +2016,6 @@ def main() -> None:
         if event == "PreToolUse" and cfg.get("fail_closed"):
             decide("deny", f"xchk: hook error ({e.__class__.__name__}) — failing closed")
         sys.exit(0)
-    if plugin_head_should_step_aside(__file__, resolve_harness(data)):
-        sys.exit(0)        # the standalone copy answers this event; see plugin_head_should_step_aside
 
 
 if __name__ == "__main__":
