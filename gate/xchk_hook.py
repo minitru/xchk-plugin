@@ -119,7 +119,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None, run_ref=None)
         except Exception:
             pass
 
-PLUGIN_VERSION = "0.1.37"
+PLUGIN_VERSION = "0.1.38"   # 21 Nov 2026: the session bridge's write rail at Stop (on_stop_inbox)
 # 16 Nov 2026: was 512 KiB, and a payload cut at the cap failed to parse and exited 0, so a Write or a heredoc over
 # 512 KiB ran with no decision at all (payload_mutation_bench.py). The cap stays as a bound on memory; a payload
 # that reaches it is refused unread in main(), never parsed short.
@@ -1934,7 +1934,7 @@ def elapsed_str(run: dict) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
-def on_heartbeat(data: dict, client: XchkClient) -> None:
+def on_heartbeat(data: dict, client: XchkClient, cfg: dict | None = None) -> None:
     """Stop event — one terse work report per completed turn: 'RUNNING 0:10'.
 
     Also flushes the local recorder (MACG-004 triangle): submit this turn's
@@ -1949,6 +1949,103 @@ def on_heartbeat(data: dict, client: XchkClient) -> None:
         # force_empty: a quiet turn still attests silence (rate-limited
         # inside flush) — the host half of bilateral provable silence.
         r.flush(client, run_ref=(run or {}).get("runRef"), force_empty=True)
+    # LAST, after the report and the flush have done their work: the session bridge's inbox (21 Nov 2026). Nothing
+    # above depends on it, and it must never be reached before the chain's record of this turn is complete.
+    on_stop_inbox(data, cfg or {}, client, run)
+
+
+# ===== THE SESSION BRIDGE'S WRITE RAIL (21 Nov 2026) =====
+#
+# Sean wants to continue a Claude Code session he opened in his own terminal from the phone. The registry cannot reach
+# this terminal, so the phone writes to a per-plate inbox on the registry and THIS hook, at every Stop, asks the registry
+# for the oldest message nobody has taken. Sean calls it "poor man's polling" and accepts it because it is the only rail
+# that reaches a session the manager did not launch (a manager-launched session gets a pty later; not here).
+#
+# Each rule, and why it exists:
+#   1. The poll is a long-poll of up to inbox_poll_sec (config; default INBOX_POLL_DEFAULT_SEC, hooks.json's Stop
+#      timeout minus a margin). The registry HOLDS it only while a thread drawer is open on the plate — someone is there
+#      to type — and answers at once otherwise, so a session nobody is watching ends its turn with no delay.
+#   2. A message that arrives is given to the model as a Stop "block" whose reason is the message: Claude Code then
+#      continues the turn with that reason, which is exactly "the person typed the next thing". The person's words are
+#      labelled as coming from the plate's thread so the model cannot mistake them for a system instruction.
+#   3. THE CEREMONY FIRST. Before the words reach the model the hook acknowledges the delivery and the registry writes
+#      a ledger record (tool session-inbox, the words, who typed them, this session) with an authRef. An ack that fails
+#      means the delivery is not on the chain, and then the words do NOT reach the model: the turn ends, the thread shows
+#      the message as delivered but not read, and the person sends it again. Unrecorded is undelivered.
+#   4. At the timeout with no message, the hook blocks with a one-line heartbeat ONLY when the registry's answer says a
+#      drawer is open (drawerOpen: the registry decides, from the drawer's presence; the hook never infers it). The model
+#      answers one line and stops again, the hook polls again: that is the loop the phone talks through. When the drawer
+#      closes the registry answers at once with drawerOpen false and the turn ends: no runaway loop.
+#   5. FAIL CLOSED means THE TURN ENDS. Any error — the registry unreachable, a malformed answer, an interrupted wait, a
+#      failed ack — makes this hook return without a decision (exit 0, no output), which Claude Code reads as "the turn
+#      ends". A block on a guess would keep a model running on words nobody sent; silence is the safe state here. This
+#      is the opposite of PreToolUse, where the safe state is a refusal: there the risk is an action, here it is a
+#      phantom instruction.
+#   6. LAST IN THE CHAIN, and never masking a refusal. on_stop_inbox runs at the end of on_heartbeat, after the run
+#      report and the local-chain flush, so the turn's record is complete before the model may continue. It issues only
+#      Stop decisions; it never touches a PreToolUse verdict, so a deny earlier in this turn stands whatever the inbox
+#      says, and a message cannot "approve" anything: the next tool call goes through the gate like any other.
+#   7. Claude Code only. Cursor, Codex, Copilot and Antigravity have their own Stop dialects and their own gates; this
+#      hook answers nothing for them here (their copies get the rail when they get it, one dialect each).
+#   8. Config, not environment: inbox_poll_sec in ~/.xchk/claude.json; 0 turns the rail off on a machine. A locked
+#      install ignores the environment (LOCKED-INSTALL-2026-11-20), and the agent is not the one to be told the switch.
+
+INBOX_POLL_DEFAULT_SEC = 285    # hooks.json Stop timeout 300 minus the margin below; the registry caps at 540
+INBOX_POLL_MARGIN_SEC = 15      # the HTTP read timeout exceeds the asked wait by this; the hook's own timeout exceeds both
+STOP_REASON_CHARS = 4400        # a message is at most 4000 characters (the registry's bound) plus its label
+
+
+def inbox_poll_sec(cfg: dict) -> int:
+    """The longest wait the gate asks of the registry; 0 = the rail is off on this machine."""
+    raw = (cfg or {}).get("inbox_poll_sec")
+    if raw in (None, ""):
+        return INBOX_POLL_DEFAULT_SEC
+    try:
+        return max(0, int(float(raw)))
+    except (TypeError, ValueError):
+        return INBOX_POLL_DEFAULT_SEC
+
+
+def stop_block(reason: str) -> None:
+    """Claude Code's Stop decision: the model continues the turn with `reason` as what came next. Top-level fields, not
+    hookSpecificOutput (that shape is PreToolUse's)."""
+    print(json.dumps({"decision": "block", "reason": str(reason or "")[:STOP_REASON_CHARS]}))
+    sys.exit(0)
+
+
+def on_stop_inbox(data: dict, cfg: dict, client: XchkClient, run: dict | None) -> None:
+    if HARNESS != "claude":
+        return
+    wait = inbox_poll_sec(cfg)
+    if wait <= 0 or not client.configured or not run or not run.get("plate"):
+        return                                   # the rail is off here, or this session has no plate: the turn ends
+    sid = str(data.get("session_id") or "")
+    try:
+        from urllib.parse import quote
+        status, body = client.request("GET", f"/api/agents/session-bridge/poll?wait={wait}&session={quote(sid)}",
+                                      timeout=wait + INBOX_POLL_MARGIN_SEC)
+    except Exception:                            # noqa: BLE001 — rule 5: an interrupted wait ends the turn
+        return
+    if status != 200 or not isinstance(body, dict):
+        return                                   # rule 5: an inbox the hook could not read delivers nothing
+    msg = body.get("message")
+    if isinstance(msg, dict) and msg.get("id") and isinstance(msg.get("text"), str) and msg["text"].strip():
+        # rule 3: the ceremony first; only a recorded delivery reaches the model
+        try:
+            st, _ack = client.request("POST", "/api/agents/session-bridge/ack",
+                                      {"messageId": str(msg["id"]), "sessionId": sid}, timeout=15)
+        except Exception:                        # noqa: BLE001
+            return
+        if st != 200:
+            return
+        who = str(msg.get("byEmail") or "the plate's thread")
+        stop_block(f"xchk: a message from {who} via the thread of plate {run.get('plate')} "
+                   f"(the person continuing this session from the phone or the wall): {msg['text'].strip()}")
+    if body.get("drawerOpen") is True:
+        # rule 4: the registry says someone is watching the thread; one line, then stop, and the hook polls again
+        stop_block("xchk heartbeat: the plate's thread is open and someone is watching this session. "
+                   "Say in one line what you are doing or waiting for, then stop.")
+    return                                       # nothing waiting, nobody watching: the turn ends
 
 
 def on_session_end(data: dict, client: XchkClient) -> None:
@@ -2005,7 +2102,7 @@ def main() -> None:
         elif event == "PreToolUse":
             on_pre_tool_use(data, cfg, client)
         elif event == "Stop":
-            on_heartbeat(data, client)
+            on_heartbeat(data, client, cfg)
         elif event == "SessionEnd":
             on_session_end(data, client)
         elif event == "PermissionRequest":
