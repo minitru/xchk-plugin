@@ -121,7 +121,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None, run_ref=None)
 
 # 0.1.38 (21 Nov 2026): the session bridge's write rail at Stop (on_stop_inbox). The line below stays bare: the
 # release scripts read the version from it with a closing-quote-at-end-of-line pattern (22 Nov 2026).
-PLUGIN_VERSION = "0.1.40"
+PLUGIN_VERSION = "0.1.41"
 # 16 Nov 2026: was 512 KiB, and a payload cut at the cap failed to parse and exited 0, so a Write or a heredoc over
 # 512 KiB ran with no decision at all (payload_mutation_bench.py). The cap stays as a bound on memory; a payload
 # that reaches it is refused unread in main(), never parsed short.
