@@ -121,7 +121,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None, run_ref=None)
 
 # 0.1.38 (21 Nov 2026): the session bridge's write rail at Stop (on_stop_inbox). The line below stays bare: the
 # release scripts read the version from it with a closing-quote-at-end-of-line pattern (22 Nov 2026).
-PLUGIN_VERSION = "0.1.39"
+PLUGIN_VERSION = "0.1.40"
 # 16 Nov 2026: was 512 KiB, and a payload cut at the cap failed to parse and exited 0, so a Write or a heredoc over
 # 512 KiB ran with no decision at all (payload_mutation_bench.py). The cap stays as a bound on memory; a payload
 # that reaches it is refused unread in main(), never parsed short.
@@ -2000,7 +2000,8 @@ def on_heartbeat(data: dict, client: XchkClient, cfg: dict | None = None) -> Non
 #      an unrecorded message fetches nothing.
 #  10. The hash is the proof. The bytes are kept only when their sha-256 is the pointer's; a mismatch deletes them and
 #      the model is told the file did not verify. The link stays in the words either way, unverified.
-#  11. Data, never a program. https only, at most INBOX_FILE_BYTES_MAX bytes, written 0600 under ~/.xchk/inbox as
+#  11. Data, never a program. https only, at most INBOX_FILE_BYTES_MAX bytes, written 0600 under ~/xchk-inbox (beside,
+#      never inside, ~/.xchk: the agent may not read the gate's home, and the inbox is for the agent to read) as
 #      <sha256>.<ext> — the extension from the pointer's content type, never from its name, which is the sender's and
 #      untrusted; the hook neither opens nor runs what it wrote. The note to the model says it is the sender's data.
 #  12. A failed fetch is not a failed delivery. The words were acknowledged and reach the model; the note says the file
@@ -2010,7 +2011,9 @@ def on_heartbeat(data: dict, client: XchkClient, cfg: dict | None = None) -> Non
 INBOX_POLL_DEFAULT_SEC = 285    # hooks.json Stop timeout 300 minus the margin below; the registry caps at 540
 INBOX_POLL_MARGIN_SEC = 15      # the HTTP read timeout exceeds the asked wait by this; the hook's own timeout exceeds both
 STOP_REASON_CHARS = 4800        # a message is at most 4000 characters (the registry's bound) plus its label and the file note
-INBOX_FILES_DIR = Path("~/.xchk/inbox").expanduser()   # where a sent file lands (rule 11); XCHK_INBOX_DIR only under test
+INBOX_FILES_DIR = Path("~/xchk-inbox").expanduser()   # where a sent file lands (rule 11), OUTSIDE ~/.xchk: the gate never lets the
+                                                       # agent read under ~/.xchk (the key, the tickets), so an inbox there was a file the
+                                                       # model was told of and could not open (22 Nov 2026, the first probe of 0.1.39)
 INBOX_FILE_BYTES_MAX = 25 * 1024 * 1024               # one file; more is refused unfetched
 INBOX_FETCH_SEC = 30                                  # well inside hooks.json's Stop timeout after the poll's own margin
 # the pointer line as js/desk2-thread.js writes it: name, content type, sha-256, then the link on its own line
