@@ -71,7 +71,7 @@ xchk-plugin/
 │   └── tests/               #   the gate's own tests, vendored with it
 ├── codex/ cursor/ antigravity/   # installers for the other harnesses (same gate, one dialect each)
 ├── mcp/xchk_mcp.py          # read-only status server (stdlib, stdio JSON-RPC)
-├── skills/                  # adopt, ask-permission, proof, request-review (both heads read the same files)
+├── skills/                  # adopt, ask-permission, proof, request-review, leave, next (both heads read the same files)
 ├── MANIFEST.sha256          # the release's file hashes (plugin variant); MANIFEST.standalone.sha256 for the curl install
 └── scripts/                 # sync-gate.sh (re-vendor), release-gate.sh and publish-release.sh (signed release)
 ```
