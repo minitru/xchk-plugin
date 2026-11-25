@@ -340,6 +340,11 @@ class XchkClient:
             "bindingClass": data.get("bindingClass"),
             "actionParamsHash": data.get("actionParamsHash"),   # 16 Nov 2026: the ask's digest, checked by the gate
         }
+        # WHY THE PERSON SAID NO (25 Nov 2026): the reason the approver chose, { code, text } from the registry's closed
+        # list. Handed to the hook only as an object; the hook's decline_note decides what of it may be printed.
+        why = data.get("declineReason")
+        if isinstance(why, dict):
+            result["declineReason"] = {"code": why.get("code"), "text": why.get("text")}
         grant = data.get("elevationGrant")
         if grant:
             result["elevation_grant"] = grant
