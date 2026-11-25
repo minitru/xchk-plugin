@@ -121,7 +121,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None, run_ref=None)
 
 # 0.1.38 (21 Nov 2026): the session bridge's write rail at Stop (on_stop_inbox). The line below stays bare: the
 # release scripts read the version from it with a closing-quote-at-end-of-line pattern (22 Nov 2026).
-PLUGIN_VERSION = "0.1.41"
+PLUGIN_VERSION = "0.1.42"
 # 16 Nov 2026: was 512 KiB, and a payload cut at the cap failed to parse and exited 0, so a Write or a heredoc over
 # 512 KiB ran with no decision at all (payload_mutation_bench.py). The cap stays as a bound on memory; a payload
 # that reaches it is refused unread in main(), never parsed short.
@@ -1925,8 +1925,29 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
         preauth_mark(data, tool_input, f"approved, attestation {att_id}")
         decide("allow", f"xchk: approved by {approver} (attestation {att_id}, area {area}, {run_ref}){held_note}")
     if result.get("status") == "declined":
-        decide("deny", f"xchk: DENIED by {approver} (attestation {att_id})")
+        # WHY THE PERSON SAID NO (25 Nov 2026): the reason the approver chose, when they chose one. The denial is the
+        # same with or without it; decline_note decides what may be printed.
+        decide("deny", f"xchk: DENIED by {approver}{decline_note(result.get('declineReason'))} (attestation {att_id})")
     decide("deny", f"xchk: approval {result.get('status') or 'failed'} (attestation {att_id}) — not executing")
+
+
+def decline_note(reason) -> str:
+    """The words a denial adds for the reason a person chose, or "" for none (25 Nov 2026).
+
+    The registry returns declineReason as { code, text } from a closed list (xchk-server utils/declineReasons). Pure,
+    and strict about what it will print into the model's context: the code only as lowercase letters and underscores
+    (at most 40), the text only as at most 80 plain characters. Anything else, or nothing, prints no reason. The
+    decision never reads this."""
+    import re as _re
+    if not isinstance(reason, dict):
+        return ""
+    code = reason.get("code")
+    if not isinstance(code, str) or not _re.fullmatch(r"[a-z_]{1,40}", code):
+        return ""
+    text = reason.get("text")
+    if isinstance(text, str) and _re.fullmatch(r"[A-Za-z0-9 ;,.'\-]{1,80}", text):
+        return f": reason given {code} ({text})"
+    return f": reason given {code}"
 
 
 def elapsed_str(run: dict) -> str:
