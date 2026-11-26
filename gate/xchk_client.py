@@ -235,6 +235,9 @@ class XchkClient:
                 # host can verify the halt itself and remember its epoch.
                 "code": (data or {}).get("code"),
                 "lockdownStatement": (data or {}).get("lockdownStatement"),
+                # 26 Nov 2026: an ended licence may carry its owner's order that the gate remove itself (Forget Me);
+                # the hook reads it only on code licence_ended (hooks/xchk_hook.py leave_ordered)
+                "leave": (data or {}).get("leave"),
                 **ref,
             }
         if status == 202 or disposition == "attest":

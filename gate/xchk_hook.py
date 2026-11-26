@@ -121,7 +121,7 @@ def _record(auth_ref, tool, intent, client=None, params_hash=None, run_ref=None)
 
 # 0.1.38 (21 Nov 2026): the session bridge's write rail at Stop (on_stop_inbox). The line below stays bare: the
 # release scripts read the version from it with a closing-quote-at-end-of-line pattern (22 Nov 2026).
-PLUGIN_VERSION = "0.1.43"
+PLUGIN_VERSION = "0.1.44"
 # 16 Nov 2026: was 512 KiB, and a payload cut at the cap failed to parse and exited 0, so a Write or a heredoc over
 # 512 KiB ran with no decision at all (payload_mutation_bench.py). The cap stays as a bound on memory; a payload
 # that reaches it is refused unread in main(), never parsed short.
@@ -1696,6 +1696,143 @@ def start_act_reading(cfg: dict, client: XchkClient, session_id: str, auth: dict
         pass
 
 
+# ── THE OWNER'S ORDER TO LEAVE (26 Nov 2026) ─────────────────────────────────────────────────────────────────────────
+# Sean: "forget me should schedule a self-destruct via the gateway", "the next poll will be it's last". A person who
+# used Forget Me left this gate on the machine with a dead key, refusing everything, until someone opened a terminal
+# and ran the leave line (seanair, 26 Nov 2026). Now the registry's refusal for the dead key carries the owner's order
+# (integratorAuth.endedLicenceForKey: `leave: { ordered: true, … }`), and the gate takes itself off.
+#
+# The rules (xchk-app docs/CONFLICTS.md row 10):
+#   1. THE ORDER IS THE OWNER'S. The registry writes it only when the owner confirmed Forget Me and did not say to
+#      leave xChk installed. The gate cannot check that; what it can check is rule 2.
+#   2. ONLY FOR ITS OWN DEAD KEY. The order is read only off a forbid whose code is licence_ended, which the registry
+#      gives only to a key that verifies against an ended plate. A live plate's answers are never read for it.
+#   3. NOTHING IS FETCHED. The removal is this function, already on the machine and covered by the manifest. The answer
+#      carries no command, no address and no path; the one sentence it carries is cut to plain characters before it is
+#      shown.
+#   4. FAIL CLOSED. If Claude Code's settings cannot be read or written, nothing is removed and the call is refused as
+#      before, with the line to run by hand. The hooks come out of the settings FIRST: a removal that stops half-way
+#      leaves a machine with no gate registered and some files, never a gate with no credential refusing everything.
+#   5. ONLY THIS INSTALL. The standalone Claude Code gate under the xChk home. The marketplace plugin copy, and every
+#      other harness, refuse as before: each has its own files and its own way out.
+#   6. Other hooks and settings are left exactly as found; a model address that is not xChk's gateway is the person's.
+
+def leave_ordered(auth) -> bool:
+    """Pure. Is this answer the registry's refusal of OUR dead key, carrying the owner's order to leave?"""
+    if not isinstance(auth, dict) or auth.get("disposition") != "forbid" or auth.get("code") != "licence_ended":
+        return False
+    lv = auth.get("leave")
+    return isinstance(lv, dict) and lv.get("ordered") is True
+
+
+def leave_sentence(auth) -> str:
+    """Pure. The registry's one sentence, as plain characters, or our own. Never shown to the model as an instruction."""
+    lv = auth.get("leave") if isinstance(auth, dict) else None
+    say = lv.get("say") if isinstance(lv, dict) else None
+    if isinstance(say, str) and 0 < len(say) <= 200 and re.fullmatch(r"[A-Za-z0-9 .,'()-]+", say):
+        return say
+    return "The owner of this plate left xChk and asked that it be removed from their machines."
+
+
+def remove_this_gate(cfg: dict, home: Path = None) -> tuple:
+    """Take the standalone Claude Code gate off this machine: (True, [what went]) or (False, why). See the rules above."""
+    import shutil
+    from urllib.parse import urlsplit
+    home = Path(home) if home else Path.home()
+    root = home / ".xchk"
+    dest = root / "claude-plugin"
+    here = Path(__file__).resolve()
+    if HARNESS != "claude" or _resolve(dest) not in [_resolve(p) for p in here.parents]:
+        return (False, "this is not the standalone Claude Code gate")
+    removed = []
+    settings = home / ".claude" / "settings.json"
+    if settings.exists():
+        try:
+            doc = json.loads(settings.read_text())
+            if not isinstance(doc, dict):
+                raise ValueError("not an object")
+        except Exception as e:
+            return (False, f"{settings} cannot be read ({e.__class__.__name__})")
+        marker = str(dest).rstrip("/") + "/"
+        hooks = doc.get("hooks") if isinstance(doc.get("hooks"), dict) else {}
+        changed = False
+        for event in list(hooks.keys()):
+            before = hooks[event] if isinstance(hooks[event], list) else []
+            after = [e for e in before if marker not in json.dumps(e) and "xchk_hook.py" not in json.dumps(e)]
+            if len(after) != len(before):
+                changed = True
+                if after:
+                    hooks[event] = after
+                else:
+                    del hooks[event]
+        if changed and not hooks and "hooks" in doc:
+            del doc["hooks"]
+        # the model gateway, when this install put it there (the uninstall script's rule, step 1b)
+        env = doc.get("env")
+        now = env.get("ANTHROPIC_BASE_URL") if isinstance(env, dict) else None
+        ours = set()
+        if cfg.get("gateway"):
+            ours.add(str(cfg["gateway"]).rstrip("/"))
+        host = urlsplit(str(cfg.get("base") or "")).hostname
+        if host:
+            ours.add(f"https://p.{host}")
+        gateway_out = isinstance(now, str) and now.rstrip("/") in ours
+        if gateway_out:
+            del env["ANTHROPIC_BASE_URL"]
+            if not env:
+                del doc["env"]
+        if changed or gateway_out:
+            try:
+                tmp = settings.with_name(settings.name + f".xchk-leave-{os.getpid()}")
+                tmp.write_text(json.dumps(doc, indent=2) + "\n")
+                os.chmod(tmp, settings.stat().st_mode & 0o777)
+                os.replace(tmp, settings)
+            except Exception as e:
+                return (False, f"{settings} cannot be written ({e.__class__.__name__})")
+            if changed:
+                removed.append("its hooks in Claude Code's settings")
+            if gateway_out:
+                removed.append("the model gateway setting")
+    # from here the gate is no longer registered: what follows is tidying, and a failure is reported, not fatal
+    try:
+        if CONFIG_PATH.exists():
+            CONFIG_PATH.unlink()
+            removed.append("the plate credential")
+    except Exception:
+        pass
+    for d in [STATE_DIR] + sorted(root.glob("claude-runs-*")):
+        if Path(d).is_dir():
+            shutil.rmtree(d, ignore_errors=True)
+    if dest.is_dir():
+        shutil.rmtree(dest, ignore_errors=True)
+        removed.append("the gate's files")
+    # the folders every gate shares go only when no other gate is left here; then the home itself, when empty
+    try:
+        others = [p for p in root.iterdir() if p.name.endswith("-plugin") or p.suffix == ".json" or p.name == "manager"]
+        if not others:
+            for name in ("runs", "session-pins"):
+                shutil.rmtree(root / name, ignore_errors=True)
+        if root.is_dir() and not any(root.iterdir()):
+            root.rmdir()
+    except Exception:
+        pass
+    return (True, removed)
+
+
+def leave_now(auth, cfg: dict) -> None:
+    """The gate's last act. Removes itself and says so to the person; when it cannot, returns and the caller refuses."""
+    base = str(cfg.get("base") or "").rstrip("/")
+    ok, detail = remove_this_gate(cfg)
+    if not ok:
+        decide("deny", f"xchk: the owner of this plate left xChk and asked that it be removed here, but the gate could not remove itself: {detail}. "
+                       f"Nothing was removed. Run in a terminal: curl -fsSL {base or 'https://in.xchk.io'}/api/uninstall | bash")
+    msg = (f"xChk has removed itself from this machine. {leave_sentence(auth)} Removed: {', '.join(detail) or 'nothing was left to remove'}. "
+           "Claude Code is no longer gated or recorded by xChk here; the plate's records stay on the registry. "
+           "Hooks already loaded in this session may report a missing file until it is restarted.")
+    print(json.dumps({"systemMessage": msg}))
+    sys.exit(0)
+
+
 def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
     tool_name = data.get("tool_name") or ""
     tool_input = data.get("tool_input") or {}
@@ -1859,6 +1996,9 @@ def on_pre_tool_use(data: dict, cfg: dict, client: XchkClient) -> None:
         preauth_mark(data, tool_input, f"allowed under {run_ref}")
         decide("allow", f"xchk: allowed under {run_ref} (area {area})")
     if auth.get("disposition") == "forbid":
+        # the owner left xChk and ordered the gate off this machine: this is its last call (26 Nov 2026)
+        if leave_ordered(auth):
+            leave_now(auth, cfg)   # exits, or refuses when it could not remove itself
         decide("deny", f"xchk: forbidden by license grant (area {area}): {auth.get('reason') or 'forbid'}")
 
     # attest — human approval required
